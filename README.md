@@ -35,11 +35,20 @@ and reveals exactly one tool on demand through the **Laya** decision endpoint.
 
 ## Install
 
-**Plugins page (Web sidebar):** Plugins → install → spec
-`/path/to/laya-tool-router-1.0.0.tgz` (tarball, absolute path, git URL, or
-an npm registry name after publishing).
+**From GitHub (recommended):** Plugins → install → spec
 
-**CLI:**
+```
+git+https://github.com/residenthiago2011/DSH-Laya-Tool-Router.git
+```
+
+or via the CLI:
+
+```sh
+dsh plugin --profile <profile> add git+https://github.com/residenthiago2011/DSH-Laya-Tool-Router.git
+```
+
+**From a tarball:** Plugins → install → spec `/path/to/laya-tool-router-1.0.0.tgz`
+(absolute path, git URL, or an npm registry name after publishing).
 
 ```sh
 dsh plugin --profile <profile> add /path/to/laya-tool-router-1.0.0.tgz
