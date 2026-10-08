@@ -1,0 +1,18 @@
+{
+  "name": "@local/laya-tool-router",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Lazy tool discovery: hides every tool schema from prefill and reveals one through a Laya Choice on demand.",
+  "meta": {
+    "title": "Laya Tool Router",
+    "description": "Zero tool schemas in prefill; discovers one tool per turn through the Laya JEV endpoint."
+  },
+  "exports": {
+    ".": "./index.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

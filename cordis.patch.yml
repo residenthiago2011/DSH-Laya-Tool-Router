@@ -1,0 +1,64 @@
+# Laya Tool Router bundle
+#
+# Declares the `no-prefill` agent preset as a FIRST-CLASS roster row.
+# (The legacy directory form at $DSH_HOME/.agent-presets/<id>/ is no longer
+#  read by DSH — see editing-cordis-compositions — which is why the old
+#  no-prefill preset never appeared on the Agent Presets page.)
+#
+# The preset's distinctive property: it mounts the router, which restricts
+# every other tool out of the agent's view, so prefill carries ONE small
+# find_tool schema instead of eleven full tool schemas.
+#
+# TOOL ROWS LIVE AT HOST SCOPE (2026-10-07): the Agent Presets page renders a
+# preset's DECLARED composition, so mounting the six tool providers here made
+# the page list every tool instead of just find_tool. The providers are now
+# enabled as host rows below (same mechanism dsh-web-app used to switch them
+# off) and `present` is inserted — the profile ships no host row for it.
+# Preset-scoped registrations shadow host ones, so standard/ptc/cordis/minimal
+# keep their own declarations and behaviour untouched.
+- insert:
+    - id: preset-no-prefill
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: no-prefill
+        name: No Prefill (Laya)
+        description: >-
+          Zero tool schemas in prefill. Discovers one tool at a time through the
+          Laya router on this device, then receives that tool's schema on demand.
+        order: 10
+        plugins:
+          # `complete` makes this persona the whole system prompt, and
+          # includeRuntimeContext:false keeps runtime context out of prefill.
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                You have NO tools declared for you.
+                To act, first call find_tool with a short description of the capability you need.
+                find_tool answers with the chosen tool's name and its JSON Schema, and makes exactly that one tool available.
+                Then call that tool using the schema it returned.
+                If find_tool returns a shortlist or no match, refine your request, or pick from the shortlist.
+              complete: true
+              includeRuntimeContext: false
+
+          # The router registers find_tool and hides everything else.
+          - id: laya-tool-router
+            name: '@local/laya-tool-router'
+
+    # The profile ships no host row for `present` — insert it so the preset
+    # needs to mount nothing. Enabled by default (no `disabled` key).
+    - id: present
+      name: '@deepseek-ai/dsh-tool-present'
+
+# Host tool providers for discovery — configs identical to what the preset
+# used to carry; only `disabled` flips.
+- id: tool-bash
+  disabled: false
+- id: tool-fs
+  disabled: false
+- id: tool-fs-search
+  disabled: false
+- id: tool-todo
+  disabled: false
+- id: tool-web
+  disabled: false

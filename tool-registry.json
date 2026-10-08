@@ -1,0 +1,863 @@
+{
+  "version": "1.0.0",
+  "generated_from": "DSH session tool surface + @deepseek-ai/dsh-tool-* v0.1.6-alpha.2",
+  "tools": [
+    {
+      "name": "pwsh",
+      "router_labels": [
+        "pwsh",
+        "shell",
+        "run command",
+        "powershell"
+      ],
+      "short": "Run a PowerShell command on Windows",
+      "description": "Execute a PowerShell command (`pwsh -Command`) and return stdout/stderr. Use for shell work on this Windows host: listing files, git, running scripts, checking processes.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "pwsh",
+          "description": "Execute a PowerShell command and return its stdout/stderr.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string",
+                "description": "The PowerShell command to execute."
+              },
+              "description": {
+                "type": "string",
+                "description": "Clear, concise description of what this command does in active voice, 5-10 words."
+              },
+              "workdir": {
+                "type": "string",
+                "description": "Working directory. Defaults to the session workspace."
+              },
+              "timeoutMs": {
+                "type": "number",
+                "description": "Timeout in milliseconds."
+              },
+              "run_in_background": {
+                "type": "boolean",
+                "description": "Run in background and return a job id."
+              }
+            },
+            "required": [
+              "command",
+              "description"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "bash",
+      "router_labels": [
+        "bash",
+        "shell",
+        "run command",
+        "terminal",
+        "echo",
+        "execute command"
+      ],
+      "short": "Run a shell command",
+      "description": "Execute a bash command and return stdout/stderr. Use for shell work: listing files, running scripts, echo, checking processes, git."
+    },
+    {
+      "name": "read",
+      "router_labels": [
+        "read",
+        "read file"
+      ],
+      "short": "Read a text file",
+      "description": "Read a UTF-8 text file and return line-numbered content.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "read",
+          "description": "Read a UTF-8 text file and return line-numbered content.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string",
+                "description": "Path to the file, resolved by the filesystem backend."
+              },
+              "offset": {
+                "type": "number",
+                "description": "1-based first line to return. Defaults to 1."
+              },
+              "limit": {
+                "type": "number",
+                "description": "Maximum number of lines to return. Defaults to 2000."
+              }
+            },
+            "required": [
+              "file_path"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "read_image",
+      "router_labels": [
+        "read_image",
+        "view image",
+        "open image"
+      ],
+      "short": "Read a PNG/JPEG image",
+      "description": "Read a PNG/JPEG/WebP/GIF file and return the image itself.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "read_image",
+          "description": "Read an image file and return the image itself.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string",
+                "description": "Path to the image file."
+              }
+            },
+            "required": [
+              "file_path"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "write",
+      "router_labels": [
+        "write",
+        "create file"
+      ],
+      "short": "Create or replace a text file",
+      "description": "Create or fully replace a UTF-8 text file.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "write",
+          "description": "Create or fully replace a UTF-8 text file.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string",
+                "description": "Path to write."
+              },
+              "content": {
+                "type": "string",
+                "description": "Full UTF-8 text content to write."
+              }
+            },
+            "required": [
+              "file_path",
+              "content"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "edit",
+      "router_labels": [
+        "edit",
+        "replace text",
+        "patch file"
+      ],
+      "short": "Replace literal text in a file",
+      "description": "Edit an existing UTF-8 text file by replacing literal text.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "edit",
+          "description": "Edit an existing UTF-8 text file by replacing literal text.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string",
+                "description": "Path to edit."
+              },
+              "old_string": {
+                "type": "string",
+                "description": "Literal text to replace."
+              },
+              "new_string": {
+                "type": "string",
+                "description": "Literal replacement text."
+              },
+              "replace_all": {
+                "type": "boolean",
+                "description": "Replace all matches. Defaults to false."
+              }
+            },
+            "required": [
+              "file_path",
+              "old_string",
+              "new_string"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "glob",
+      "router_labels": [
+        "glob",
+        "find files",
+        "list files by pattern"
+      ],
+      "short": "Find files by path pattern",
+      "description": "Find files whose paths match a glob pattern.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "glob",
+          "description": "Find files whose paths match a glob pattern.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "pattern": {
+                "type": "string",
+                "description": "Glob pattern to match file paths against."
+              },
+              "path": {
+                "type": "string",
+                "description": "Directory to search in."
+              }
+            },
+            "required": [
+              "pattern"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "grep",
+      "router_labels": [
+        "grep",
+        "search file contents"
+      ],
+      "short": "Search file contents with regex",
+      "description": "Search file contents with a ripgrep regular expression.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "grep",
+          "description": "Search file contents with a ripgrep regular expression.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "pattern": {
+                "type": "string",
+                "description": "Regular expression to search for."
+              },
+              "path": {
+                "type": "string",
+                "description": "File or directory to search."
+              },
+              "include": {
+                "type": "string",
+                "description": "One glob filter for which files to search."
+              }
+            },
+            "required": [
+              "pattern"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "web_search",
+      "router_labels": [
+        "web_search",
+        "search web"
+      ],
+      "short": "Search the web",
+      "description": "Search the web for current information.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "web_search",
+          "description": "Search the web for current information.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "queries": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "1-4 search queries."
+              }
+            },
+            "required": [
+              "queries"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "web_fetch",
+      "router_labels": [
+        "web_fetch",
+        "fetch url",
+        "open web page"
+      ],
+      "short": "Fetch a URL",
+      "description": "Fetch the content of a specific HTTP(S) URL and return it as text.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "web_fetch",
+          "description": "Fetch the content of a specific HTTP(S) URL and return it as text.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "The HTTP(S) URL to fetch."
+              }
+            },
+            "required": [
+              "url"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "todo_write",
+      "router_labels": [
+        "todo_write",
+        "make todo list",
+        "plan tasks"
+      ],
+      "short": "Record and update a task list",
+      "description": "Record and update a task list to plan multi-step work and show progress.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "todo_write",
+          "description": "Record and update a task list to plan multi-step work.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "todos": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "content": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "pending",
+                        "in_progress",
+                        "completed"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "content",
+                    "status"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "todos"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "ask_user_question",
+      "router_labels": [
+        "ask_user_question",
+        "ask user"
+      ],
+      "short": "Ask the user to choose",
+      "description": "Ask the user a concise question when you need confirmation, a choice, or missing information.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "ask_user_question",
+          "description": "Ask the user a concise question when you need confirmation or missing information.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "questions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "question": {
+                      "type": "string"
+                    },
+                    "header": {
+                      "type": "string"
+                    },
+                    "options": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "label": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "label"
+                        ]
+                      }
+                    },
+                    "multi_select": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "question"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "questions"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "job_output",
+      "router_labels": [
+        "job_output",
+        "check job",
+        "read job output"
+      ],
+      "short": "Read a background job",
+      "description": "Read a background job: output since the previous read, or the result of a finished job.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "job_output",
+          "description": "Read a background job's output.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "job_id": {
+                "type": "string",
+                "description": "Job id returned by the tool that started the work."
+              },
+              "wait": {
+                "type": "boolean"
+              },
+              "timeout_ms": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "job_id"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "job_kill",
+      "router_labels": [
+        "job_kill",
+        "stop job",
+        "cancel job"
+      ],
+      "short": "Cancel a background job",
+      "description": "Request cancellation of a running background job.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "job_kill",
+          "description": "Request cancellation of a running background job.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "job_id": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "job_id"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "job_list",
+      "router_labels": [
+        "job_list",
+        "list jobs"
+      ],
+      "short": "List background jobs",
+      "description": "List background jobs with their ids, kinds, and statuses.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "job_list",
+          "description": "List background jobs with their ids, kinds, and statuses.",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "present",
+      "router_labels": [
+        "present",
+        "deliver file"
+      ],
+      "short": "Declare deliverable files",
+      "description": "Declare existing files as final deliverables for the user.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "present",
+          "description": "Declare existing files as final deliverables for the user.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "path"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "files"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "skill",
+      "router_labels": [
+        "skill",
+        "load skill"
+      ],
+      "short": "Load skill instructions",
+      "description": "Load the full instructions for a skill before acting on a task that matches it.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "skill",
+          "description": "Load the full instructions for a skill.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "The exact skill name from the catalog."
+              }
+            },
+            "required": [
+              "name"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "subagent_fork",
+      "router_labels": [
+        "subagent_fork",
+        "delegate task",
+        "spawn subagent"
+      ],
+      "short": "Delegate to a subagent",
+      "description": "Delegate a task to a subagent that inherits this conversation.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "subagent_fork",
+          "description": "Delegate a task to a subagent that inherits this conversation.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": "string",
+                "description": "Short (3-5 word) description of the task."
+              },
+              "prompt": {
+                "type": "string",
+                "description": "The task for the subagent."
+              },
+              "run_in_background": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "description",
+              "prompt"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "send_message",
+      "router_labels": [
+        "send_message",
+        "message agent"
+      ],
+      "short": "Send a message to an agent",
+      "description": "Send a message to an agent; a working agent receives it at its next step.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "send_message",
+          "description": "Send a message to an agent.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "agent_id",
+              "message"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "interrupt_agent",
+      "router_labels": [
+        "interrupt_agent",
+        "stop agent"
+      ],
+      "short": "Ask a subagent to stop",
+      "description": "Ask a subagent to stop its current work.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "interrupt_agent",
+          "description": "Ask a subagent to stop its current work.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "agent_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "agent_id"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "list_agents",
+      "router_labels": [
+        "list_agents",
+        "list subagents"
+      ],
+      "short": "List subagents",
+      "description": "List subagents with their ids, labels, and statuses.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "list_agents",
+          "description": "List subagents with their ids, labels, and statuses.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "children",
+                  "descendants"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "create_goal",
+      "router_labels": [
+        "create_goal",
+        "set goal"
+      ],
+      "short": "Create a persisted goal",
+      "description": "Create a persisted goal that keeps the session working across continuation rounds.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "create_goal",
+          "description": "Create a persisted goal for long-running objectives.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "objective": {
+                "type": "string"
+              },
+              "max_goal_rounds": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "objective"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "workflow",
+      "router_labels": [
+        "workflow",
+        "orchestrate agents"
+      ],
+      "short": "Run a multi-agent workflow script",
+      "description": "Run a JavaScript workflow script that orchestrates subagents at scale.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "workflow",
+          "description": "Run a JavaScript workflow script that orchestrates subagents at scale.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "script": {
+                "type": "string",
+                "description": "The plain JavaScript body."
+              },
+              "meta": {
+                "type": "object"
+              },
+              "args": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "script",
+              "meta"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "str_replace_editor",
+      "router_labels": [
+        "str_replace_editor",
+        "edit via editor"
+      ],
+      "short": "View/create/replace via editor tool",
+      "description": "Model-facing view, create, literal replace, and line insert tool over the Harness filesystem service.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "str_replace_editor",
+          "description": "View, create, or replace text via the editor tool.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string",
+                "enum": [
+                  "view",
+                  "create",
+                  "str_replace",
+                  "insert"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "old_str": {
+                "type": "string"
+              },
+              "new_str": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command",
+              "path"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "exit_plan_mode",
+      "router_labels": [
+        "exit_plan_mode",
+        "present plan"
+      ],
+      "short": "Present a plan for approval",
+      "description": "Present a plan for the user's review and, on approval, leave plan mode.",
+      "schema": {
+        "type": "function",
+        "function": {
+          "name": "exit_plan_mode",
+          "description": "Present a plan for the user's review.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "plan": {
+                "type": "string",
+                "description": "The complete plan as markdown."
+              }
+            },
+            "required": [
+              "plan"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
