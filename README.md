@@ -47,11 +47,13 @@ or via the CLI:
 dsh plugin --profile <profile> add git+https://github.com/residenthiago2011/DSH-Laya-Tool-Router.git
 ```
 
-**From a tarball:** Plugins → install → spec `/path/to/laya-tool-router-1.0.0.tgz`
-(absolute path, git URL, or an npm registry name after publishing).
+**From a prebuilt tarball:** download
+[`laya-tool-router.tgz`](https://github.com/residenthiago2011/DSH-Laya-Tool-Router/releases/latest/download/laya-tool-router.tgz)
+from Releases, then install from the local path (also accepted: absolute
+path, git URL, or an npm registry name after publishing):
 
 ```sh
-dsh plugin --profile <profile> add /path/to/laya-tool-router-1.0.0.tgz
+dsh plugin --profile <profile> add /path/to/laya-tool-router.tgz
 ```
 
 Then select the bundle on the Plugins page (installation enables it by
