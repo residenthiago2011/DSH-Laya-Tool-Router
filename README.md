@@ -4,13 +4,49 @@ Lazy tool discovery for DSH: hides every tool schema from the model's prefill
 and reveals exactly one tool on demand through the **Laya** decision endpoint.
 
 - **Prefill cost:** one small `find_tool` schema instead of every mounted tool
-  (~11 full schemas on a default profile).
+  (26 schemas on a default Standard profile — see [Why?](#why)).
 - **Stage 0** — lexical rank picks ≤ 8 candidates (stopword-filtered).
 - **Stage 1** — one `POST /v1/systemone` to Laya: a `bestTool` choice plus a
   `usable` noul question (~150 tokens).
 - **Stage 2** — accept iff `confidence >= 0.30` and `p(noul) <= 0.30`: return
   the winner's JSON Schema and reveal exactly that one tool; otherwise return
   a shortlist. Exact tool-name requests skip Laya and reveal instantly.
+
+## Why?
+
+Fresh session, first message, server-reported `usage.prompt_tokens` —
+the DSH **Standard preset** (the platform default) versus this plugin's
+`no-prefill` preset:
+
+| Cost before the first word | Standard | no-prefill |
+|---|---:|---:|
+| Prefill tokens | **6,559** | **283** |
+| System prompt | 5,816 chars | 372 chars |
+| Tool schemas shipped up front | **26 schemas (21,417 B)** | 1 schema (697 B) |
+
+Standard makes the model ingest a 5.8k-character system prompt plus **every**
+mounted tool schema — 6,559 tokens — before it emits a single word, and pays
+it again on every subsequent turn. `no-prefill` ingests 283 tokens (**23×
+less**, 96% smaller prefill): a slim persona plus the single `find_tool`
+schema. On the measured backend that difference was ~40 s versus ~14 min of
+prompt evaluation for the first reply.
+
+What that buys you:
+
+- **Latency** — time-to-first-word scales with the whole tool shelf today.
+  Reveal-on-demand makes it scale with the tool you actually call.
+- **Context budget** — 6.5k tokens of standing preamble is 6.5k tokens you
+  don't have for code, conversation, and results. On a 32k window that's ~20%
+  of the model's world spent before work starts.
+- **Reliability on small models** — a model reading 26 schemas behaves like a
+  model reading 26 instructions it must never violate. One schema at a time is
+  one schema to follow; the rest of the shelf doesn't exist for it.
+- **Pay for what you use** — a turn that calls no tool costs 283 tokens
+  instead of 6,559. A turn that calls one tool reveals that one schema once;
+  the other 25 are never sent.
+
+If a session ends up using most tools anyway, the gap narrows — but the unused
+half of the shelf is exactly what a default profile charges for from word one.
 
 ## What the bundle patch declares
 
