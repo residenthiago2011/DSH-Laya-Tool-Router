@@ -10,14 +10,15 @@
  * agent inherits them. This plugin makes exactly one tool visible — find_tool —
  * and reveals a second only after Laya names it.
  *
- *   Stage 0  lexical rank -> top <= MAX_CHOICES          (free, bounded)
- *   Stage 1  ONE Laya POST /v1/systemone, two questions:
- *              bestTool : choice over <=8 candidates  (no none_of_the_above)
- *              usable   : noul companion              (no-match signal)
- *            ~150 tokens, ~13.7 s on the Moto G8
- *   Stage 2  accept iff p(noul) <= NOUL_MAX && confidence >= CONF_MIN
+ *   Stage 0  full-surface send: every mounted tool (<= MAX_CHOICES) carries
+ *            rich criteria; the lexical rank only bounds pathological mounts
+ *   Stage 1  ONE POST /v1/systemone, two questions:
+ *              bestTool : choice over the whole mounted surface
+ *              usable   : noul companion (telemetry only — see NOUL_INSTR)
+ *            ~235-500 tokens, ~6-7 s (d1-omni-600M, full surface, 160-char criteria)
+ *   Stage 2  accept iff confidence >= CONF_MIN
  *              yes -> return the winner's JSON Schema, expose exactly that one
- *              no  -> return a shortlist, expose nothing
+ *              no  -> probability-ordered shortlist + exact-name retry hint
  *
  * Why no none_of_the_above: rl_agent_config.json sets
  * temperature_by_options["choice:11+"] = 0.1006 (logits x10), so that option
@@ -35,15 +36,25 @@
 
 export const inject = ['tools'];
 
-// --- measured tuning (laya-acceptance-rule-probe.py, laya-routing-envelope-probe.py)
+// --- measured tuning (laya-acceptance-rule-probe.py, laya-routing-envelope-probe.py;
+//     re-calibrated for llama.cpp b11609 + LiquidAI d1-omni-600M-Q8_0)
 const LAYA_BASE = 'http://127.0.0.1:8081';
 const LAYA_PATH = '/v1/systemone';
 const CHOICE_INSTR = 'Best matching tool for the request.';
-const NOUL_INSTR = 'Is this request NOT handled by any of the listed tools?';
-const MAX_CHOICES = 8;   // >=10 saturates confidence to 1.000
-const DESC_CHARS = 56;   // ~14 tokens; fits the 19-token budget at N=8
-const CONF_MIN = 0.30;   // rejects every unmatched request in the test set
-const NOUL_MAX = 0.30;   // matched p(noul) 0.11-0.32 | unmatched 0.20-0.72
+// Asked for TELEMETRY ONLY. d1-omni's noul head proved unreliable in both
+// phrasings: the NOT form pinned pNone=0.841 on a bash-conf=1.000 match, the
+// YES form answered 0.886 "unhandled" on a read-conf=0.99 match. Confidence
+// alone decided every recorded probe correctly (matched 0.72-1.00 revealed,
+// unmatched <=0.71 rejected), so the noul value is logged but never gates.
+const NOUL_INSTR = 'Is this request handled by any of the listed tools?';
+const MAX_CHOICES = 24;   // full-surface send; cap only for pathological mounts (d1 window = 16,384 tokens)
+const DESC_CHARS = 160;   // ~40 tokens/criterion; d1-omni has room for rich descriptions (was 56, a laya-era budget)
+// Full-surface + rich-criteria calibration (2026-10-17 probes over the real
+// mounted surface): matched conf 0.72-1.00, unmatched <=0.71 (poem 0.246,
+// flight 0.165, translate 0.559). 0.85 bounced the 0.722 config-read match;
+// 0.70 splits the sets with margin. Recheck when criteria text changes again.
+const CONF_MIN = 0.70;
+const NOUL_MAX = 0.20;   // telemetry only — kept in logs/payloads, not enforced
 const FETCH_TIMEOUT_MS = 60000;
 const SELF = 'find_tool';
 
@@ -65,6 +76,8 @@ try {
 
 const log = (...a) => console.error('[laya-router]', ...a);
 
+const CANDIDATES = [...new Set([...Object.keys(LABELS), 'bash', 'present'])];
+
 const tokenise = (s) => String(s ?? '')
   .toLowerCase()
   .split(/[^a-z0-9_]+/)
@@ -79,7 +92,7 @@ const STOPWORDS = new Set([
   'would', 'should', 'could', 'been', 'being', 'does', 'done',
 ]);
 
-/** Stage 0 — cheap lexical rank so the Laya call stays bounded. */
+/** Stage 0 — ordering for the full send; a bound only above MAX_CHOICES. */
 function rank(query, names) {
   const terms = [...new Set(tokenise(query))]
     .filter((t) => t.length >= 3 && !STOPWORDS.has(t));
@@ -108,15 +121,17 @@ async function askLaya(request, candidates, signal) {
   const criteria = {};
   for (const { name } of candidates) {
     const rec = LABELS[name] || {};
-    criteria[name] = ((rec.short || '') || name).slice(0, DESC_CHARS) || name;
+    // Rich criteria: d1-omni reads descriptions as the option definitions.
+    // e.g. bash's "checking processes" is exactly what a memory query needs.
+    criteria[name] = ((rec.description || '') || rec.short || name).slice(0, DESC_CHARS);
   }
 
   const body = JSON.stringify({
-    state: {
-      agentRequest: String(request).slice(0, 800),
-      context: 'Harness tool discovery.',
-      routingStage: 'discovery',
-    },
+    // d1-omni (llama.cpp): a bare STRING state calibrates the companion noul
+    // and the choice confidence; the laya-era object form made unmatched
+    // requests score conf>=0.92 AND p(noul)<=0.02, so no threshold could ever
+    // reject them (measured: 0/13 zero-wrong-accept params with the object).
+    state: String(request).slice(0, 800),
     questions: {
       bestTool: { type: 'choice', instructions: CHOICE_INSTR, criteria },
       usable: { type: 'noul', instructions: NOUL_INSTR },
@@ -146,7 +161,8 @@ async function askLaya(request, candidates, signal) {
   return {
     choice: choice.choice ?? null,
     confidence: Number(choice.confidence ?? 0),
-    pNone: Number(usable.noul ?? 1),
+    // Positive phrasing: usable.noul = P(handled). pNone is its complement.
+    pNone: 1 - Number(usable.noul ?? 0),
     probabilities: choice.probabilities ?? {},
   };
 }
@@ -162,31 +178,70 @@ export function apply(ctx) {
   /** Pending mask-arming retries; cleared on dispose. */
   const timers = new Set();
 
+  /**
+   * Re-entrancy control for mask arming. DSH fires tools/change (and even
+   * agent/created) synchronously from inside tools.restrict(), which used to
+   * recurse until "Maximum call stack size exceeded" and leave a 500 ms
+   * arm/disarm storm that eventually took the harness down. Rules:
+   *   - one re-arm in flight per agent (rec.arming);
+   *   - change events arriving while any arming is in flight are deferred to
+   *     a macrotask (pendingFlush) instead of running nested;
+   *   - an armed mask whose deny set did not change is left untouched, so
+   *     deferred drains converge instead of re-restricting forever.
+   */
+  let pendingFlush = false;
+  let drainScheduled = false;
+  /** onChange lives inside effect(); set there, used here for the drain. */
+  let onChangeRef = null;
+
   /** Deny everything except find_tool and anything already revealed. */
+  /**
+   * What this agent can currently see, resolved with `tools.get(name, agent)` —
+   * the exact form DSH's own execution path uses (`tools.get(exec.name,
+   * exec.agent)`). `tools.schemas(agent)` never returned on device (idle CPU, no
+   * further log output after the call), so it is deliberately avoided.
+   * Restricted tools resolve to undefined here, which is why callers keep a
+   * grow-only memory of everything already seen.
+   */
+  const probe = (agent) => {
+    const found = new Map();
+    // (1) Registry names via tools.get(name, agent) — the restricted-safe form.
+    for (const n of CANDIDATES) {
+      if (n === SELF) continue;
+      let def = null;
+      try { def = ctx.tools.get(n, agent); } catch { def = null; }
+      if (def) {
+        found.set(def.name || n, {
+          name: def.name || n,
+          description: def.description || '',
+          parameters: def.parameters || null,
+        });
+      }
+    }
+    // (2) No-arg enumeration as a safety net: catches a tool registering
+    // AFTER arming whose name is NOT in the registry (schemas() is bounded —
+    // adopt already calls it every boot — and the WITH-AGENT form, which
+    // hangs on device, is deliberately avoided).
+    try {
+      for (const s of ctx.tools.schemas() ?? []) {
+        if (s?.name && s.name !== SELF && !found.has(s.name)) {
+          found.set(s.name, {
+            name: s.name,
+            description: s.description || '',
+            parameters: s.parameters || null,
+          });
+        }
+      }
+    } catch { /* enumeration unavailable — registry scan stands */ }
+    return [...found.values()];
+  };
+
   const recompute = (agent) => {
     const rec = byAgent.get(agent);
     if (!rec) return false;
-    // DSH emits tools/change from INSIDE restrict()/dispose(). Without this
-    // guard, onChange re-enters recompute -> restrict -> onChange -> ... until
-    // "Maximum call stack size exceeded" (observed at boot, service_direct.log).
-    // The pending async copy of the same event is harmless: the dedup below
-    // makes it a no-op instead of another restrict round-trip.
-    if (rec.busy) return true;
-    rec.busy = true;
-    try { return armMask(agent, rec); } finally { rec.busy = false; }
-  };
+    if (rec.arming) { pendingFlush = true; return false; } // in flight, deferred
 
-  /** Core arming logic; runs only while rec.busy is held by recompute(). */
-  const armMask = (agent, rec) => {
-    let live = [];
-    // SCOPE MATTERS: schemas() with no argument returns the GLOBAL layer, and
-    // every host tool row is `disabled: true`, so that view is always empty.
-    // The agent itself is the scope key — `ctx.tools.schemas(agent)` is exactly
-    // what dsh-cordis-host-runner does — and yields what this agent inherits.
-    try { live = ctx.tools.schemas(agent); } catch (e) {
-      log('schemas(agent) failed:', e?.message ?? e);
-      return false;
-    }
+    const live = probe(agent);
 
     // GROW-ONLY memory of the full surface. Once a mask is armed, `live` comes
     // back restricted (only find_tool + revealed tools), so overwriting
@@ -210,21 +265,27 @@ export function apply(ctx) {
       return false;
     }
 
-    // DEDUP: restrict()/dispose() themselves fire tools/change, so re-arming
-    // with an identical deny list would re-fire the event forever (the boot
-    // log looped "armed mask hiding 11 tool(s)" ~970 times). Only touch the
-    // restriction when the deny set actually moved (new registration or a
-    // reveal).
-    const key = deny.slice().sort().join('\n');
-    if (rec.dispose && rec.armedKey === key) return true;
+    deny.sort();
+    const key = deny.join(',');
+    if (rec.dispose && rec.key === key) return true; // armed for exactly this set
 
     try {
+      rec.arming = true;
       if (rec.dispose) rec.dispose();          // lift, then re-arm fresh
       rec.dispose = agent.ctx.tools.restrict({ deny });
-      rec.armedKey = key;
+      rec.key = key;
     } catch (e) {
       log('restrict failed:', e?.message ?? e);
       return false;
+    } finally {
+      rec.arming = false;
+      if (pendingFlush) {
+        pendingFlush = false;
+        if (!drainScheduled) {
+          drainScheduled = true;
+          setTimeout(() => { drainScheduled = false; onChangeRef?.(); }, 0);
+        }
+      }
     }
     rec.schemas = all;                         // grow-only
     log(`agent ${short(agent)}: armed mask hiding ${deny.length} tool(s); `
@@ -241,10 +302,17 @@ export function apply(ctx) {
    */
   const scheduleRetry = (agent, attempt = 0) => {
     if (attempt >= 20) { log(`agent ${short(agent)}: gave up arming mask`); return; }
+    const start = byAgent.get(agent);
+    if (!start) return;
+    if (attempt === 0) {
+      if (start.retryScheduled) return;        // one pending retry per agent
+      start.retryScheduled = true;
+    }
     const t = setTimeout(() => {
       timers.delete(t);
       const rec = byAgent.get(agent);
-      if (!rec || rec.dispose) return;         // already armed or gone
+      if (!rec || rec.dispose) { if (rec) rec.retryScheduled = false; return; }
+      rec.retryScheduled = false;
       if (recompute(agent)) return;
       scheduleRetry(agent, attempt + 1);
     }, 500);
@@ -273,16 +341,11 @@ export function apply(ctx) {
     log(`adopt entry ${short(agent)}: ctx.tools=${ready} alreadyTracked=${already}`);
     if (!ready || already) return false;
 
-    let schemas = [];
-    // The agent is the scope key; the no-arg call would be the empty global layer.
-    try { schemas = ctx.tools.schemas(agent); } catch (e) {
-      log('schemas(agent) failed for new agent:', e?.message ?? e);
-      return false;
-    }
-    byAgent.set(agent, {
-      agent, schemas, revealed: new Set(),
-      dispose: null, busy: false, armedKey: null,
-    });
+    // Initial surface via tools.get(...), not tools.schemas(agent) — the latter
+    // never returned on device. Empty here is normal: preset tool plugins mount
+    // asynchronously, so recompute() returns pending and we retry.
+    const schemas = probe(agent);
+    byAgent.set(agent, { agent, schemas, revealed: new Set(), dispose: null });
 
     let ok = false;
     try { ok = recompute(agent); } catch (e) {
@@ -310,20 +373,20 @@ export function apply(ctx) {
         + 'Returns the matching tool name and its full JSON Schema, and makes that '
         + 'one tool callable. Call this BEFORE any other tool - no other tools are '
         + 'exposed to you until you do.',
-      // STANDARD JSON Schema, not the author-style {name: schema} map.
-      // defineTool() compiles author-style for built-in tools; a raw register()
-      // does not, and a malformed parameters object reaches the LLM verbatim
-      // (pi-ai passes it through), leaving the grammar unconstrained — which is
-      // how the model ended up calling find_tool with {}.
+      // Wire-level JSON Schema: this definition is registered RAW (no defineTool
+      // wrapper), and the DSL form {request:{type,...}} reached the model
+      // unconverted (top-level type:"string"), so the model sent {} and execute
+      // threw. Raw registrations must therefore carry the JsonSchemaNode form.
       parameters: {
         type: 'object',
         properties: {
           request: {
             type: 'string',
-            description:
-              'REQUIRED, must not be empty. Short plain-language description of '
-              + 'the capability needed, e.g. "read a file" or "search code for a '
-              + 'pattern", or an exact tool name.',
+            description: 'REQUIRED, must not be empty. Short plain-language '
+              + 'description of the capability needed, e.g. "read a file" or '
+              + '"search code for a pattern", or an exact tool name. If a '
+              + 'result carries no schema, retry with an exact tool name '
+              + '(e.g. "bash"), or send an empty request to list all names.',
           },
         },
         required: ['request'],
@@ -345,8 +408,7 @@ export function apply(ctx) {
 
         // rec.schemas is the grow-only FULL surface (hidden tools included);
         // a live query would only return the un-masked remainder.
-        const source = rec?.schemas
-          ?? (agent ? ctx.tools.schemas(agent) : ctx.tools.schemas());
+        const source = rec?.schemas ?? (agent ? probe(agent) : []);
         const byName = new Map(source.map((s) => [s?.name, s]));
         const names = [...byName.keys()].filter((n) => n && n !== SELF);
 
@@ -394,7 +456,8 @@ export function apply(ctx) {
           };
         }
 
-        // Stage 0 — bound the candidate set before touching Laya.
+        // Stage 0/1 — full-surface send: rank only ORDERs the batch; the cap
+        // bites only above MAX_CHOICES (pathological mounts).
         const ranked = rank(request, names);
         const candidates = ranked.slice(0, Math.max(2, Math.min(MAX_CHOICES, names.length)));
 
@@ -420,17 +483,33 @@ export function apply(ctx) {
         const pNone = answer.pNone;
         const probabilities = answer.probabilities;
 
-        // Acceptance: 12/13 correct decisions, zero wrong accepts. Below either
-        // floor we return a shortlist instead of forcing a bad tool.
-        if (!chosen || confidence < CONF_MIN || pNone > NOUL_MAX) {
+        // Acceptance: confidence alone decides (see NOUL_INSTR — noul is
+        // telemetry only). On reject, order the shortlist by Laya's own
+        // probabilities and name the closest match so the model can retry
+        // with an exact name instead of giving up.
+        if (!chosen || confidence < CONF_MIN) {
+          const byProb = Object.entries(probabilities || {})
+            .sort((a, b) => Number(b[1]) - Number(a[1]))
+            .map(([n]) => n)
+            .filter((n) => byName.has(n) && n !== SELF);
+          const shortlist = [
+            ...new Set([...byProb, ...candidates.map((c) => c.name)]),
+          ].slice(0, 5);
+          const closest = byProb[0] ?? null;
+          const topProb = closest ? probabilities?.[closest] : undefined;
           log(`reject "${request.slice(0, 48)}" conf=${confidence.toFixed(3)} `
-            + `pNone=${pNone.toFixed(3)}`);
+            + `pNone=${pNone.toFixed(3)} `
+            + (closest ? `closest=${closest}${topProb !== undefined ? ` p=${Number(topProb).toFixed(3)}` : ''}` : ''));
           return {
             selected: null, confidence, pNone, probabilities,
-            shortlist: candidates.slice(0, 5).map((c) => c.name),
-            reason: pNone > NOUL_MAX
-              ? `No listed tool fits (p(noul)=${pNone.toFixed(3)} > ${NOUL_MAX}).`
-              : `Confidence ${confidence.toFixed(2)} below ${CONF_MIN}.`,
+            shortlist,
+            reason: closest
+              ? `Confidence ${confidence.toFixed(2)} below ${CONF_MIN}. `
+                + `Closest match: ${closest}. Call find_tool again with `
+                + `"${closest}" as the exact request, or with an empty request `
+                + `to list every tool name.`
+              : `Confidence ${confidence.toFixed(2)} below ${CONF_MIN}. `
+                + 'Call find_tool with an empty request to list every tool name.',
             schema: null,
           };
         }
@@ -482,6 +561,9 @@ export function apply(ctx) {
     // into prefill, so re-arm on every registry change.
     const onChange = () => {
       if (byAgent.size === 0) return;          // nothing to protect yet
+      for (const r of byAgent.values()) {
+        if (r.arming) { pendingFlush = true; return; } // defer to drain
+      }
       let armed = 0;
       let pending = 0;
       for (const agent of byAgent.keys()) {
@@ -493,6 +575,7 @@ export function apply(ctx) {
       log(`tools/change -> ${armed} armed, ${pending} pending`);
     };
     ctx.on('tools/change', onChange);
+    onChangeRef = onChange;
 
     log('subscribed to agent/created + tools/change');
 

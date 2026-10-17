@@ -60,6 +60,17 @@ const toolsService = {
     emit('tools/change', {});
   },
   schemas() { return schemasFor(); },
+  // Device semantics: tools.get(name, agent) resolves restricted tools to
+  // undefined and revealed/unrestricted ones to their definition. probe()
+  // in index.js uses this exact shape (tools.schemas(agent) hangs on device).
+  get(name) {
+    if (denied.has(name)) return undefined;
+    const reg = registry.get(name);
+    if (reg) return { name, description: reg.description, parameters: reg.parameters ?? null };
+    const d = defs.find((x) => x[0] === name);
+    if (d) return { name: d[0], description: d[1], parameters: baseParams };
+    return undefined;
+  },
   restrict({ deny }) {
     if (!Array.isArray(deny) || deny.length === 0) throw new Error('restrict called with bad deny');
     restrictCalls++;

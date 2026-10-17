@@ -5,12 +5,18 @@ and reveals exactly one tool on demand through the **Laya** decision endpoint.
 
 - **Prefill cost:** one small `find_tool` schema instead of every mounted tool
   (26 schemas on a default Standard profile — see [Why?](#why)).
-- **Stage 0** — lexical rank picks ≤ 8 candidates (stopword-filtered).
+- **Stage 0** — full-surface send: every mounted tool (≤ 24) carries a
+  160-char criterion, ordered by a stopword-filtered lexical rank (the rank
+  only bounds pathological mounts — d1-omni does not saturate as the choice
+  count grows; see [Why?](#why)).
 - **Stage 1** — one `POST /v1/systemone` to Laya: a `bestTool` choice plus a
-  `usable` noul question (~150 tokens).
-- **Stage 2** — accept iff `confidence >= 0.30` and `p(noul) <= 0.30`: return
-  the winner's JSON Schema and reveal exactly that one tool; otherwise return
-  a shortlist. Exact tool-name requests skip Laya and reveal instantly.
+  `usable` question kept as telemetry only (~235–500 tokens, ~6–7 s on-device).
+- **Stage 2** — accept iff `confidence >= 0.70`: return the winner's JSON
+  Schema and reveal exactly that one tool; otherwise return a
+  **probability-ordered shortlist** whose reason names the closest match, so
+  the model can retry with that exact tool name (or send an empty request to
+  get the whole catalog). Exact tool-name requests skip Laya and reveal
+  instantly.
 
 ## Why?
 
@@ -54,7 +60,8 @@ half of the shelf is exactly what a default profile charges for from word one.
 
 1. **`preset-no-prefill`** — an agent preset whose composition is only
    `persona` + `laya-tool-router`. The persona tells the model: no tools are
-   declared; call `find_tool` first.
+   declared; call `find_tool` first — and if a result carries no schema,
+   retry with an exact tool name or an empty request instead of giving up.
 2. **Host tool rows enabled** — `tool-bash`, `tool-fs`, `tool-fs-search`,
    `tool-todo`, `tool-web` flipped to `disabled: false`, plus a `present`
    row inserted. Discovery needs the tools to exist somewhere; preset-scoped
@@ -106,7 +113,7 @@ tool flips vanish with the bundle patch; other presets are untouched.
 |---|---|
 | `index.js` | The router plugin: registers `find_tool`, masks every other tool per agent, runs the 3-stage decision. |
 | `cordis.patch.yml` | The bundle patch: preset declaration + host tool enablement. |
-| `tool-registry.json` | Stage-0 labels (25 tools, including `bash`) and Stage-1 short criteria. |
+| `tool-registry.json` | Stage-0 labels and Stage-1 criteria (25 tools, both shells incl. `bash`). |
 
 ## Tests
 
