@@ -1,4 +1,4 @@
-// End-to-end test: router plugin against the LIVE laya server (127.0.0.1:8081)
+// End-to-end test: router plugin against the LIVE decision endpoint (127.0.0.1:8081)
 // with a stub DSH context whose restrict()/dispose() emit tools/change
 // SYNCHRONOUSLY — the worst case that produced the boot stack overflow and the
 // ~970x feedback loop in service_direct.log.
@@ -115,7 +115,7 @@ emit('tools/change', {});
 assert(restrictCalls === 2, `late registration re-arms once (restrictCalls=${restrictCalls})`);
 assert(denied.has('extra_tool'), 'late-registered tool is denied');
 
-// Stage 1+2 — real Laya call, reveal, re-arm with the smaller deny.
+// Stage 1+2 — real decision-model call, reveal, re-arm with the smaller deny.
 const def = registry.get('find_tool');
 assert(def.parameters?.type === 'object'
   && def.parameters?.required?.includes('request')
@@ -143,7 +143,7 @@ assert(empty?.selected === null && Array.isArray(empty?.available) && empty.avai
   `empty request returns catalog hint (available=${empty?.available?.length})`);
 assert(restrictCalls === 3, `empty request does not re-arm (restrictCalls=${restrictCalls})`);
 
-// Exact tool-name request skips Laya and reveals instantly.
+// Exact tool-name request skips the decision call and reveals instantly.
 const fast = await def.execute({ request: 'grep' }, { agent });
 assert(fast?.selected === 'grep' && !!fast?.schema, `exact name fast path reveals (selected=${fast?.selected})`);
 assert(!denied.has('grep'), 'grep removed from deny list by fast path');

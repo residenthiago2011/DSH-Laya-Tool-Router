@@ -1,5 +1,5 @@
 /**
- * Laya Tool Router — lazy tool discovery for the DeepSeek Harness.
+ * DSH Tool Router — lazy tool discovery for the DeepSeek Harness.
  *
  * Prefill problem: in `native` presentation EVERY visible tool schema is paid on
  * EVERY request. DSH: "Restrictions that hide tools remove their entire schema
@@ -8,11 +8,11 @@
  * tool-fs-search, tool-web, tool-todo, tool-skill, tool-goal, tool-ralph,
  * tool-jobs, tool-subagent*, tool-workflow, plugin-manager/tools …), and every
  * agent inherits them. This plugin makes exactly one tool visible — find_tool —
- * and reveals a second only after Laya names it.
+ * and reveals a second only after the decision model names it.
  *
  *   Stage 0  full-surface send: every mounted tool (<= MAX_CHOICES) carries
  *            rich criteria; the lexical rank only bounds pathological mounts
- *   Stage 1  ONE POST /v1/systemone, two questions:
+ *   Stage 1  ONE POST /v1/systemone to the decision model API, two questions:
  *              bestTool : choice over the whole mounted surface
  *              usable   : noul companion (telemetry only — see NOUL_INSTR)
  *            ~235-500 tokens, ~6-7 s (d1-omni-600M, full surface, 160-char criteria)
@@ -36,10 +36,10 @@
 
 export const inject = ['tools'];
 
-// --- measured tuning (laya-acceptance-rule-probe.py, laya-routing-envelope-probe.py;
-//     re-calibrated for llama.cpp b11609 + LiquidAI d1-omni-600M-Q8_0)
-const LAYA_BASE = 'http://127.0.0.1:8081';
-const LAYA_PATH = '/v1/systemone';
+// --- measured tuning (decision-endpoint probes; re-calibrated for llama.cpp
+//     b11609 + a d1-omni-600M-Q8_0 decision model)
+const ROUTER_BASE = 'http://127.0.0.1:8081';
+const ROUTER_PATH = '/v1/systemone';
 const CHOICE_INSTR = 'Best matching tool for the request.';
 // Asked for TELEMETRY ONLY. d1-omni's noul head proved unreliable in both
 // phrasings: the NOT form pinned pNone=0.841 on a bash-conf=1.000 match, the
@@ -48,7 +48,7 @@ const CHOICE_INSTR = 'Best matching tool for the request.';
 // unmatched <=0.71 rejected), so the noul value is logged but never gates.
 const NOUL_INSTR = 'Is this request handled by any of the listed tools?';
 const MAX_CHOICES = 24;   // full-surface send; cap only for pathological mounts (d1 window = 16,384 tokens)
-const DESC_CHARS = 160;   // ~40 tokens/criterion; d1-omni has room for rich descriptions (was 56, a laya-era budget)
+const DESC_CHARS = 160;   // ~40 tokens/criterion; d1-omni has room for rich descriptions (was 56, an earlier tighter budget)
 // Full-surface + rich-criteria calibration (2026-10-17 probes over the real
 // mounted surface): matched conf 0.72-1.00, unmatched <=0.71 (poem 0.246,
 // flight 0.165, translate 0.559). 0.85 bounced the 0.722 config-read match;
@@ -71,10 +71,10 @@ try {
     if (entry && entry.name) LABELS[entry.name] = entry;
   }
 } catch (e) {
-  console.error('[laya-router] label registry unavailable:', e?.message ?? e);
+  console.error('[dsh-tool-router] label registry unavailable:', e?.message ?? e);
 }
 
-const log = (...a) => console.error('[laya-router]', ...a);
+const log = (...a) => console.error('[dsh-tool-router]', ...a);
 
 const CANDIDATES = [...new Set([...Object.keys(LABELS), 'bash', 'present'])];
 
@@ -115,8 +115,8 @@ function rank(query, names) {
   return scored;
 }
 
-/** Stage 1 — one bounded Laya call carrying a choice AND a noul. */
-async function askLaya(request, candidates, signal) {
+/** Stage 1 — one bounded decision-model call carrying a choice AND a noul. */
+async function askDecision(request, candidates, signal) {
   // No none_of_the_above here — it competes with the real tools.
   const criteria = {};
   for (const { name } of candidates) {
@@ -128,7 +128,7 @@ async function askLaya(request, candidates, signal) {
 
   const body = JSON.stringify({
     // d1-omni (llama.cpp): a bare STRING state calibrates the companion noul
-    // and the choice confidence; the laya-era object form made unmatched
+    // and the choice confidence; an earlier object form made unmatched
     // requests score conf>=0.92 AND p(noul)<=0.02, so no threshold could ever
     // reject them (measured: 0/13 zero-wrong-accept params with the object).
     state: String(request).slice(0, 800),
@@ -144,7 +144,7 @@ async function askLaya(request, candidates, signal) {
     ? AbortSignal.any([signal, timeout].filter(Boolean))
     : timeout;
 
-  const res = await fetch(LAYA_BASE + LAYA_PATH, {
+  const res = await fetch(ROUTER_BASE + ROUTER_PATH, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body,
@@ -152,7 +152,7 @@ async function askLaya(request, candidates, signal) {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`Laya HTTP ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`decision endpoint HTTP ${res.status}: ${text.slice(0, 200)}`);
   }
   const json = await res.json();
   const answers = json?.answers ?? {};
@@ -435,7 +435,7 @@ export function apply(ctx) {
           };
         }
 
-        // Exact tool-name match (case-insensitive) skips Laya: the name can
+        // Exact tool-name match (case-insensitive) skips the decision call: the name can
         // only have come from our own shortlist, so the choice is certain.
         const hit = byName.get(request) ?? byName.get(request.toLowerCase());
         if (hit && hit.name !== SELF) {
@@ -464,13 +464,13 @@ export function apply(ctx) {
         let answer = null;
         let error = null;
         try {
-          answer = await askLaya(request, candidates, exec.signal);
+          answer = await askDecision(request, candidates, exec.signal);
         } catch (e) {
           error = e instanceof Error ? e.message : String(e);
         }
 
         if (error) {
-          log('Laya call failed:', error);
+          log('decision call failed:', error);
           return {
             selected: null, confidence: 0, pNone: 1, error,
             shortlist: candidates.slice(0, 5).map((c) => c.name),
@@ -484,7 +484,7 @@ export function apply(ctx) {
         const probabilities = answer.probabilities;
 
         // Acceptance: confidence alone decides (see NOUL_INSTR — noul is
-        // telemetry only). On reject, order the shortlist by Laya's own
+        // telemetry only). On reject, order the shortlist by the decision model's own
         // probabilities and name the closest match so the model can retry
         // with an exact name instead of giving up.
         if (!chosen || confidence < CONF_MIN) {

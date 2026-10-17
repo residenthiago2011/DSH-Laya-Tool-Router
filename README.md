@@ -1,7 +1,7 @@
-# Laya Tool Router
+# DSH Tool Router
 
 Lazy tool discovery for DSH: hides every tool schema from the model's prefill
-and reveals exactly one tool on demand through the **Laya** decision endpoint.
+and reveals exactly one tool on demand through a **decision model API**.
 
 - **Prefill cost:** one small `find_tool` schema instead of every mounted tool
   (26 schemas on a default Standard profile — see [Why?](#why)).
@@ -9,14 +9,15 @@ and reveals exactly one tool on demand through the **Laya** decision endpoint.
   160-char criterion, ordered by a stopword-filtered lexical rank (the rank
   only bounds pathological mounts — d1-omni does not saturate as the choice
   count grows; see [Why?](#why)).
-- **Stage 1** — one `POST /v1/systemone` to Laya: a `bestTool` choice plus a
-  `usable` question kept as telemetry only (~235–500 tokens, ~6–7 s on-device).
+- **Stage 1** — one `POST /v1/systemone` to the decision model API: a
+  `bestTool` choice plus a `usable` question kept as telemetry only
+  (~235–500 tokens, ~6–7 s on-device).
 - **Stage 2** — accept iff `confidence >= 0.70`: return the winner's JSON
   Schema and reveal exactly that one tool; otherwise return a
   **probability-ordered shortlist** whose reason names the closest match, so
   the model can retry with that exact tool name (or send an empty request to
-  get the whole catalog). Exact tool-name requests skip Laya and reveal
-  instantly.
+  get the whole catalog). Exact tool-name requests skip the decision call and
+  reveal instantly.
 
 ## Why?
 
@@ -59,7 +60,7 @@ half of the shelf is exactly what a default profile charges for from word one.
 `cordis.patch.yml` (applied when the bundle is selected):
 
 1. **`preset-no-prefill`** — an agent preset whose composition is only
-   `persona` + `laya-tool-router`. The persona tells the model: no tools are
+   `persona` + `dsh-tool-router`. The persona tells the model: no tools are
    declared; call `find_tool` first — and if a result carries no schema,
    retry with an exact tool name or an empty request instead of giving up.
 2. **Host tool rows enabled** — `tool-bash`, `tool-fs`, `tool-fs-search`,
@@ -71,8 +72,9 @@ half of the shelf is exactly what a default profile charges for from word one.
 ## Prerequisites
 
 - DSH 0.2.0-rc.2 (bundles mechanism with `dsh.bundle.patch`).
-- A running **Laya** endpoint at `http://127.0.0.1:8081/v1/systemone`
-  (edit `LAYA_BASE` in `index.js` to change; default port 8081).
+- A running **decision model API** that speaks `POST /v1/systemone`
+  (the router defaults to `http://127.0.0.1:8081/v1/systemone`; edit
+  `ROUTER_BASE` in `index.js` to point at another host or port).
 - `pnpm` on PATH of the host running DSH (the plugin manager installs
   through pnpm; the CLI forwards pnpm arguments).
 
@@ -81,22 +83,22 @@ half of the shelf is exactly what a default profile charges for from word one.
 **From GitHub (recommended):** Plugins → install → spec
 
 ```
-git+https://github.com/residenthiago2011/DSH-Laya-Tool-Router.git
+git+https://github.com/residenthiago2011/DSH-Tool-Router.git
 ```
 
 or via the CLI:
 
 ```sh
-dsh plugin --profile <profile> add git+https://github.com/residenthiago2011/DSH-Laya-Tool-Router.git
+dsh plugin --profile <profile> add git+https://github.com/residenthiago2011/DSH-Tool-Router.git
 ```
 
 **From a prebuilt tarball:** download
-[`laya-tool-router.tgz`](https://github.com/residenthiago2011/DSH-Laya-Tool-Router/releases/latest/download/laya-tool-router.tgz)
+[`dsh-tool-router.tgz`](https://github.com/residenthiago2011/DSH-Tool-Router/releases/latest/download/dsh-tool-router.tgz)
 from Releases, then install from the local path (also accepted: absolute
 path, git URL, or an npm registry name after publishing):
 
 ```sh
-dsh plugin --profile <profile> add /path/to/laya-tool-router.tgz
+dsh plugin --profile <profile> add /path/to/dsh-tool-router.tgz
 ```
 
 Then select the bundle on the Plugins page (installation enables it by
@@ -120,12 +122,12 @@ tool flips vanish with the bundle patch; other presets are untouched.
 ```sh
 node router-import-test.mjs   # module shape (no dependencies)
 node rank-sim.mjs             # Stage-0 ranking on sample queries (needs tool-registry.json)
-node router-e2e-test.mjs      # full flow: arm/deny-set/live reveal — requires Laya at 127.0.0.1:8081
+node router-e2e-test.mjs      # full flow: arm/deny-set/live reveal — requires the decision endpoint at 127.0.0.1:8081
 ```
 
 `router-e2e-test.mjs` uses a stub DSH context that emits `tools/change`
 synchronously (the worst case that once caused a ~970x feedback loop), then
-drives the real `find_tool` against a live Laya endpoint: armed-once,
+drives the real `find_tool` against a live decision endpoint: armed-once,
 deny-set dedup, late registration, reveal re-arm, empty-request catalog hint,
 and the exact-name fast path. `ALL_PASS` is expected.
 

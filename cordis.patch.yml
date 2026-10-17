@@ -1,4 +1,4 @@
-# Laya Tool Router bundle
+# DSH Tool Router bundle
 #
 # Declares the `no-prefill` agent preset as a FIRST-CLASS roster row.
 # (The legacy directory form at $DSH_HOME/.agent-presets/<id>/ is no longer
@@ -21,10 +21,10 @@
       name: '@deepseek-ai/dsh-agent-preset'
       config:
         id: no-prefill
-        name: No Prefill (Laya)
+        name: No Prefill
         description: >-
           Zero tool schemas in prefill. Discovers one tool at a time through the
-          Laya router on this device, then receives that tool's schema on demand.
+          decision model API on this device, then receives that tool's schema on demand.
         order: 10
         plugins:
           # `complete` makes this persona the whole system prompt, and
@@ -43,8 +43,8 @@
               includeRuntimeContext: false
 
           # The router registers find_tool and hides everything else.
-          - id: laya-tool-router
-            name: '@local/laya-tool-router'
+          - id: dsh-tool-router
+            name: '@local/dsh-tool-router'
 
     # The profile ships no host row for `present` — insert it so the preset
     # needs to mount nothing. Enabled by default (no `disabled` key).
