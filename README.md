@@ -123,6 +123,7 @@ tool flips vanish with the bundle patch; other presets are untouched.
 node router-import-test.mjs   # module shape (no dependencies)
 node rank-sim.mjs             # Stage-0 ranking on sample queries (needs tool-registry.json)
 node router-e2e-test.mjs      # full flow: arm/deny-set/live reveal — requires the decision endpoint at 127.0.0.1:8081
+node restrict-scope-test.mjs   # deny-set vs the global registry (agent-scoped tools)
 ```
 
 `router-e2e-test.mjs` uses a stub DSH context that emits `tools/change`
