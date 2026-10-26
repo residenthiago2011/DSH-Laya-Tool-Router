@@ -273,13 +273,21 @@ export function apply(ctx) {
     // "gave up arming mask". On device (27-name surface, 24 globally registered)
     // that left toolsTokens at 5837 where ~1400 was reachable.
     //
-    // The rejection names exactly what DSH admits ("known global tools: a, b, c"),
-    // so reconcile against THAT instead of remembering exclusions. A remembered
-    // blacklist is wrong while tool plugins are still mounting — the admission list
-    // is briefly short, so correct names get blacklisted and stay hidden forever
-    // (measured: deny stuck at 14 of 24). Reconciling and recomputing on every
-    // tools/change converges instead of sticking.
-    let deny = wanted;
+    // Reconcile against the admission list the rejection itself reports
+    // ("known global tools: a, b, c"), and MEMOISE the result per exact surface.
+    // The memo is load-bearing, not an optimisation: restrict() fires tools/change
+    // synchronously, so every successful arm re-enters recompute(). Without the
+    // memo that re-entry started from the un-reconciled set again, threw, lifted
+    // the good mask and re-armed — a self-sustaining storm (measured on device:
+    // ~2800 arm cycles/s on one core, 8k log lines/s). Keying the memo on the
+    // surface also keeps this correct while tool plugins are still mounting: a
+    // smaller surface is a different key, so nothing learned there leaks onto the
+    // full surface later (which is what a name-based blacklist got wrong: it stuck
+    // at 14 of 24).
+    const wantedKey = wanted.slice().sort().join(',');
+    const resolved = rec.resolved ?? (rec.resolved = new Map());
+    let deny = (resolved.get(wantedKey) ?? wanted).slice();
+
     let armed = false;
     for (let attempt = 0; attempt < 3 && !armed; attempt += 1) {
       deny.sort();
@@ -288,9 +296,8 @@ export function apply(ctx) {
       try {
         rec.arming = true;
         // Lift first, then re-arm fresh. Nulling the disposer matters: a rejected
-        // attempt below leaves the loop with no live mask, and the key check at the
-        // top must not then conclude "already armed for this set" (that left the
-        // agent with its mask lifted and every schema back in prefill).
+        // attempt leaves this loop with no live mask, and the key check above must
+        // not then conclude "already armed for this set".
         if (rec.dispose) { rec.dispose(); rec.dispose = null; }
         rec.dispose = agent.ctx.tools.restrict({ deny });
         rec.key = key;
@@ -310,6 +317,7 @@ export function apply(ctx) {
           + `(${deny.filter((n) => !admitted.has(n)).join(', ')}); `
           + `denying ${next.length}`);
         deny = next;
+        resolved.set(wantedKey, next.slice());  // never pay this rejection twice
         if (deny.length === 0) {
           log(`agent ${short(agent)}: no globally-registered tool to hide yet (pending)`);
           return false;

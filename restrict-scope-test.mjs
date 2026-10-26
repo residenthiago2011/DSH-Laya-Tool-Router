@@ -1,21 +1,12 @@
-// Device-semantics regression for recompute()'s mask arming.
+// Regression for the LOCAL PATCH in index.js recompute().
+// DSH's tools.restrict() validates every deny name against the GLOBAL registry
+// and throws the whole call if any single name is unknown there.
 //
-// `tools.restrict({ deny })` validates every name against the GLOBAL tool
-// registry and throws the whole call when a single name is unknown there.
-// A profile whose surface includes agent-scoped tools (a team's send_message /
-// list_agents / interrupt_agent) therefore failed to arm at all:
-//   restrict failed: tools.restrict() names unknown global tools
-//     "interrupt_agent", "list_agents", "send_message"; known global tools: ...
-//   ... x20 retries over 10 s ...
-//   gave up arming mask
-// and every tool schema stayed in prefill. router-e2e-test.mjs cannot catch this
-// because its stub restrict() only checks that deny is non-empty (line ~75).
-//
-// Scenario 1: agent-scoped names in the deny set -> one rejection, reconcile, ARM.
-// Scenario 2: registry still mounting (2 names known) -> whatever arms early must
-//             CONVERGE once the rest registers; a remembered blacklist would not.
-//
-//   node restrict-scope-test.mjs      expects ALL_PASS
+// Scenario 1: agent-scoped tools (send_message/list_agents/interrupt_agent) are
+//             in the deny set -> one rejection, self-heal, then ARM.
+// Scenario 2: the global registry is only partially populated at agent creation
+//             -> whatever arms early must CONVERGE once the registry fills and
+//             tools/change fires (the real 07:44:40 -> 07:44:57 sequence).
 import { apply } from "./index.js";
 
 const params = { type: "object", properties: { request: { type: "string" } }, required: ["request"] };
@@ -62,6 +53,10 @@ function harness(readyRef) {
       }
       restrictCalls += 1;
       for (const n of deny) denied.add(n);
+      // DEVICE SEMANTICS: restrict() fires tools/change synchronously, which
+      // re-enters recompute(). Without the surface memo this re-entry restarts
+      // from the un-reconciled set and storms (~2800 arm cycles/s on device).
+      emitChange();
       return () => { for (const n of deny) denied.delete(n); };
     },
   };
@@ -71,7 +66,9 @@ function harness(readyRef) {
     off() {},
     effect(fn) { return fn(); },
   };
-  const agent = { id: "session-scope", ctx: { tools } };
+  const agent = { id: "session-test", ctx: { tools } };
+  // DEVICE SEMANTICS: restrict() fires tools/change synchronously.
+  const emitChange = () => { for (const fn of (listeners.get("tools/change") ?? [])) fn({}); };
   const fire = (e, p) => { for (const f of (listeners.get(e) ?? [])) f(p ?? {}); };
   return { ctx, agent, denied, fire, stats: () => ({ restrictCalls, rejects }) };
 }
@@ -86,15 +83,15 @@ const main = async () => {
     const st = h.stats();
     console.log("restrictCalls=" + st.restrictCalls + " rejects=" + st.rejects + " denied=" + h.denied.size);
     ok(st.restrictCalls === 1, "mask armed exactly once (restrictCalls=" + st.restrictCalls + ")");
-    ok(st.rejects === 1, "exactly one rejection before reconciling (rejects=" + st.rejects + ")");
+    ok(st.rejects === 1, "exactly one rejection before self-healing (rejects=" + st.rejects + ")");
     ok(!h.denied.has("find_tool"), "find_tool itself never denied");
-    for (const n of AGENT_SCOPED) ok(!h.denied.has(n), n + " stays visible (not global)");
+    for (const n of AGENT_SCOPED) ok(!h.denied.has(n), n + " stays visible (cannot be denied)");
     for (const n of ["bash", "read", "write", "edit", "grep", "web_search"]) {
       ok(h.denied.has(n), n + " denied");
     }
   }
 
-  console.log("--- scenario 2: registry partially mounted, then fills ---");
+  console.log("--- scenario 2: registry partially populated, then fills ---");
   {
     const readyRef = { list: ["find_tool", "read_image"] };
     const h = harness(readyRef);
@@ -102,17 +99,32 @@ const main = async () => {
     h.fire("agent/created", { agent: h.agent });
     await tick();
     console.log("after partial mount: denied=" + h.denied.size);
+    // tool plugins finish mounting
     readyRef.list = GLOBAL.slice();
     h.fire("tools/change", {});
     await tick();
     h.fire("tools/change", {});
     await tick();
-    console.log("after registry ready: denied=" + h.denied.size);
+    const st = h.stats();
+    console.log("after registry ready: restrictCalls=" + st.restrictCalls + " denied=" + h.denied.size);
     ok(h.denied.has("bash"), "bash denied after convergence");
     ok(h.denied.has("read"), "read denied after convergence");
     ok(h.denied.has("grep"), "grep denied after convergence");
     ok(h.denied.size >= 20, "deny set converged to the full surface (denied=" + h.denied.size + ")");
     ok(!h.denied.has("find_tool"), "find_tool still visible after convergence");
+  }
+
+  console.log("--- scenario 3: restrict() re-enters synchronously (device semantics) ---");
+  {
+    const h = harness({ list: GLOBAL.slice() });
+    apply(h.ctx);
+    h.fire("agent/created", { agent: h.agent });
+    await tick();
+    const st = h.stats();
+    console.log("restrictCalls=" + st.restrictCalls + " rejects=" + st.rejects + " denied=" + h.denied.size);
+    ok(st.restrictCalls <= 4, "no arm/disarm storm from synchronous tools/change (restrictCalls=" + st.restrictCalls + ")");
+    ok(st.rejects <= 2, "rejection not paid repeatedly (rejects=" + st.rejects + ")");
+    ok(h.denied.size >= 20, "mask actually armed after re-entry (denied=" + h.denied.size + ")");
   }
 
   console.log(failures.length === 0 ? "ALL_PASS" : "HAS_FAILURES: " + failures.join(" | "));
