@@ -254,10 +254,10 @@ export function apply(ctx) {
     }
     const all = [...merged.values()];
 
-    const deny = all
+    const wanted = all
       .filter((s) => s.name !== SELF && !rec.revealed.has(s.name))
       .map((s) => s.name);
-    if (deny.length === 0) {
+    if (wanted.length === 0) {
       // NOTHING TO HIDE YET. At agent creation the preset's tool plugins have
       // often not mounted. Returning success here would arm an empty mask and
       // let every later-registered tool into prefill — signal pending instead.
@@ -265,28 +265,67 @@ export function apply(ctx) {
       return false;
     }
 
-    deny.sort();
-    const key = deny.join(',');
-    if (rec.dispose && rec.key === key) return true; // armed for exactly this set
-
-    try {
-      rec.arming = true;
-      if (rec.dispose) rec.dispose();          // lift, then re-arm fresh
-      rec.dispose = agent.ctx.tools.restrict({ deny });
-      rec.key = key;
-    } catch (e) {
-      log('restrict failed:', e?.message ?? e);
-      return false;
-    } finally {
-      rec.arming = false;
-      if (pendingFlush) {
-        pendingFlush = false;
-        if (!drainScheduled) {
-          drainScheduled = true;
-          setTimeout(() => { drainScheduled = false; onChangeRef?.(); }, 0);
+    // `tools.restrict({ deny })` validates EVERY name against the GLOBAL registry
+    // and throws the whole call when a single name is unknown there. Agent-scoped
+    // tools — a team's send_message / list_agents / interrupt_agent — are registered
+    // per agent, not globally, so ONE of them poisons the entire deny set: the mask
+    // never arms, every schema stays in prefill, and the retry loop ends in
+    // "gave up arming mask". On device (27-name surface, 24 globally registered)
+    // that left toolsTokens at 5837 where ~1400 was reachable.
+    //
+    // The rejection names exactly what DSH admits ("known global tools: a, b, c"),
+    // so reconcile against THAT instead of remembering exclusions. A remembered
+    // blacklist is wrong while tool plugins are still mounting — the admission list
+    // is briefly short, so correct names get blacklisted and stay hidden forever
+    // (measured: deny stuck at 14 of 24). Reconciling and recomputing on every
+    // tools/change converges instead of sticking.
+    let deny = wanted;
+    let armed = false;
+    for (let attempt = 0; attempt < 3 && !armed; attempt += 1) {
+      deny.sort();
+      const key = deny.join(',');
+      if (rec.dispose && rec.key === key) return true; // armed for exactly this set
+      try {
+        rec.arming = true;
+        // Lift first, then re-arm fresh. Nulling the disposer matters: a rejected
+        // attempt below leaves the loop with no live mask, and the key check at the
+        // top must not then conclude "already armed for this set" (that left the
+        // agent with its mask lifted and every schema back in prefill).
+        if (rec.dispose) { rec.dispose(); rec.dispose = null; }
+        rec.dispose = agent.ctx.tools.restrict({ deny });
+        rec.key = key;
+        armed = true;
+      } catch (e) {
+        const msg = String(e?.message ?? e);
+        const known = /known global tools:\s*(.*)$/im.exec(msg);
+        const admitted = known
+          ? new Set(known[1].split(',').map((n) => n.trim()).filter(Boolean))
+          : null;
+        const next = admitted ? deny.filter((n) => admitted.has(n)) : deny;
+        if (!admitted || next.length === deny.length) {
+          log('restrict failed:', msg);        // not a scope problem — real failure
+          return false;
+        }
+        log(`restrict rejected ${deny.length - next.length} agent-scoped tool(s) `
+          + `(${deny.filter((n) => !admitted.has(n)).join(', ')}); `
+          + `denying ${next.length}`);
+        deny = next;
+        if (deny.length === 0) {
+          log(`agent ${short(agent)}: no globally-registered tool to hide yet (pending)`);
+          return false;
+        }
+      } finally {
+        rec.arming = false;
+        if (pendingFlush) {
+          pendingFlush = false;
+          if (!drainScheduled) {
+            drainScheduled = true;
+            setTimeout(() => { drainScheduled = false; onChangeRef?.(); }, 0);
+          }
         }
       }
     }
+    if (!armed) return false;
     rec.schemas = all;                         // grow-only
     log(`agent ${short(agent)}: armed mask hiding ${deny.length} tool(s); `
       + `revealed=${rec.revealed.size}`);
