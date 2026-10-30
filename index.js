@@ -254,10 +254,10 @@ export function apply(ctx) {
     }
     const all = [...merged.values()];
 
-    const deny = all
+    const wanted = all
       .filter((s) => s.name !== SELF && !rec.revealed.has(s.name))
       .map((s) => s.name);
-    if (deny.length === 0) {
+    if (wanted.length === 0) {
       // NOTHING TO HIDE YET. At agent creation the preset's tool plugins have
       // often not mounted. Returning success here would arm an empty mask and
       // let every later-registered tool into prefill — signal pending instead.
@@ -265,28 +265,75 @@ export function apply(ctx) {
       return false;
     }
 
-    deny.sort();
-    const key = deny.join(',');
-    if (rec.dispose && rec.key === key) return true; // armed for exactly this set
+    // `tools.restrict({ deny })` validates EVERY name against the GLOBAL registry
+    // and throws the whole call when a single name is unknown there. Agent-scoped
+    // tools — a team's send_message / list_agents / interrupt_agent — are registered
+    // per agent, not globally, so ONE of them poisons the entire deny set: the mask
+    // never arms, every schema stays in prefill, and the retry loop ends in
+    // "gave up arming mask". On device (27-name surface, 24 globally registered)
+    // that left toolsTokens at 5837 where ~1400 was reachable.
+    //
+    // Reconcile against the admission list the rejection itself reports
+    // ("known global tools: a, b, c"), and MEMOISE the result per exact surface.
+    // The memo is load-bearing, not an optimisation: restrict() fires tools/change
+    // synchronously, so every successful arm re-enters recompute(). Without the
+    // memo that re-entry started from the un-reconciled set again, threw, lifted
+    // the good mask and re-armed — a self-sustaining storm (measured on device:
+    // ~2800 arm cycles/s on one core, 8k log lines/s). Keying the memo on the
+    // surface also keeps this correct while tool plugins are still mounting: a
+    // smaller surface is a different key, so nothing learned there leaks onto the
+    // full surface later (which is what a name-based blacklist got wrong: it stuck
+    // at 14 of 24).
+    const wantedKey = wanted.slice().sort().join(',');
+    const resolved = rec.resolved ?? (rec.resolved = new Map());
+    let deny = (resolved.get(wantedKey) ?? wanted).slice();
 
-    try {
-      rec.arming = true;
-      if (rec.dispose) rec.dispose();          // lift, then re-arm fresh
-      rec.dispose = agent.ctx.tools.restrict({ deny });
-      rec.key = key;
-    } catch (e) {
-      log('restrict failed:', e?.message ?? e);
-      return false;
-    } finally {
-      rec.arming = false;
-      if (pendingFlush) {
-        pendingFlush = false;
-        if (!drainScheduled) {
-          drainScheduled = true;
-          setTimeout(() => { drainScheduled = false; onChangeRef?.(); }, 0);
+    let armed = false;
+    for (let attempt = 0; attempt < 3 && !armed; attempt += 1) {
+      deny.sort();
+      const key = deny.join(',');
+      if (rec.dispose && rec.key === key) return true; // armed for exactly this set
+      try {
+        rec.arming = true;
+        // Lift first, then re-arm fresh. Nulling the disposer matters: a rejected
+        // attempt leaves this loop with no live mask, and the key check above must
+        // not then conclude "already armed for this set".
+        if (rec.dispose) { rec.dispose(); rec.dispose = null; }
+        rec.dispose = agent.ctx.tools.restrict({ deny });
+        rec.key = key;
+        armed = true;
+      } catch (e) {
+        const msg = String(e?.message ?? e);
+        const known = /known global tools:\s*(.*)$/im.exec(msg);
+        const admitted = known
+          ? new Set(known[1].split(',').map((n) => n.trim()).filter(Boolean))
+          : null;
+        const next = admitted ? deny.filter((n) => admitted.has(n)) : deny;
+        if (!admitted || next.length === deny.length) {
+          log('restrict failed:', msg);        // not a scope problem — real failure
+          return false;
+        }
+        log(`restrict rejected ${deny.length - next.length} agent-scoped tool(s) `
+          + `(${deny.filter((n) => !admitted.has(n)).join(', ')}); `
+          + `denying ${next.length}`);
+        deny = next;
+        resolved.set(wantedKey, next.slice());  // never pay this rejection twice
+        if (deny.length === 0) {
+          log(`agent ${short(agent)}: no globally-registered tool to hide yet (pending)`);
+          return false;
+        }
+      } finally {
+        rec.arming = false;
+        if (pendingFlush) {
+          pendingFlush = false;
+          if (!drainScheduled) {
+            drainScheduled = true;
+            setTimeout(() => { drainScheduled = false; onChangeRef?.(); }, 0);
+          }
         }
       }
     }
+    if (!armed) return false;
     rec.schemas = all;                         // grow-only
     log(`agent ${short(agent)}: armed mask hiding ${deny.length} tool(s); `
       + `revealed=${rec.revealed.size}`);
