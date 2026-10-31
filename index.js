@@ -435,7 +435,19 @@ export function apply(ctx) {
     try {
       const sessions = typeof ctx.get === 'function' ? ctx.get('sessions') : undefined;
       const session = sessions?.get?.(agent?.id) ?? agent?.session;
-      const events = session?.snapshotEvents?.() ?? session?.ownEvents?.() ?? [];
+      // REAL API (verified in @deepseek-ai/dsh-session): the log rides on
+      // Session as the `events` ARRAY — `const events = session.events` inside
+      // store._forkSeed() — while `sessions.get(id): Session | undefined` is
+      // the only lookup the store documents. snapshotEvents()/ownEvents()
+      // match NO build inspected here (0 hits across the whole install), so
+      // without this fallback the seed silently returned [] and the 419k-token
+      // retry loop it exists to stop kept happening while the stub test
+      // passed. Method-shaped variants stay ahead of the property so a future
+      // build offering one still wins cleanly.
+      const events = session?.snapshotEvents?.()
+        ?? session?.ownEvents?.()
+        ?? session?.events
+        ?? [];
       for (const ev of events) {
         const name = ev?.type === 'tool/call' ? ev.data?.name : undefined;
         if (name && name !== SELF) revealed.add(name);

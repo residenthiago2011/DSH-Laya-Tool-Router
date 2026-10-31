@@ -88,11 +88,16 @@ const toolsService = {
 
 // Session-log stub: lets a test agent claim which tools it already called.
 // The plugin must rebuild `revealed` from these events after any re-mount.
+// REAL DSH SHAPE (verified in @deepseek-ai/dsh-session): a Session exposes the
+// log as the `events` ARRAY (store._forkSeed reads session.events) and the
+// store exposes get(id) -> Session | undefined. The stub must NOT invent
+// snapshotEvents() — that is exactly how PR #2 could pass this test while the
+// real seed silently returned [] on the host.
 const sessionEvents = new Map();
 const sessionsService = {
   get(id) {
     const ev = sessionEvents.get(String(id));
-    return ev ? { snapshotEvents: () => ev } : undefined;
+    return ev ? { id: String(id), events: ev } : undefined;
   },
 };
 

@@ -97,6 +97,17 @@ mod.apply(ctx);
 assert(registry.has('find_tool'), 'find_tool registered at mount');
 
 const agent = { id: 'session-e2etest001', ctx: { tools: toolsService } };
+
+// PR #2: the plugin reconciles at agent/pre-step (cordis waterfall with a
+// next() continuation), not tools/change. Drive it the way dsh-agent-loop
+// does: dsh-agent-loop calls dispatch.waterfall('agent/pre-step', payload).
+const preStep = async () => {
+  const next = () => Promise.resolve({ kind: 'enter', messages: [] });
+  for (const fn of (listeners.get('agent/pre-step') ?? [])) {
+    await fn({ agent, messages: [], turn: 1, step: 1 }, next);
+  }
+};
+
 emit('agent/created', { agent });
 
 assert(restrictCalls === 1, `armed exactly once on adopt (restrictCalls=${restrictCalls})`);
@@ -109,11 +120,15 @@ emit('tools/change', {});
 emit('tools/change', {});
 assert(restrictCalls === 1, `unchanged deny is a no-op (restrictCalls=${restrictCalls})`);
 
-// A tool registering late must re-arm exactly once.
+// A tool registering late must re-arm exactly once — and only at a step
+// boundary now: PR #2 removed the tools/change listener, so the event alone
+// must no longer write to the registry.
 defs.push(['extra_tool', 'An extra late-registered tool']);
 emit('tools/change', {});
-assert(restrictCalls === 2, `late registration re-arms once (restrictCalls=${restrictCalls})`);
-assert(denied.has('extra_tool'), 'late-registered tool is denied');
+assert(restrictCalls === 1, `tools/change alone no longer re-arms (restrictCalls=${restrictCalls})`);
+await preStep();
+assert(restrictCalls === 2, `late registration re-arms once at the step boundary (restrictCalls=${restrictCalls})`);
+assert(denied.has('extra_tool'), 'late-registered tool is denied before the next request');
 
 // Stage 1+2 — real decision-model call, reveal, re-arm with the smaller deny.
 const def = registry.get('find_tool');

@@ -5,8 +5,11 @@
 // Scenario 1: agent-scoped tools (send_message/list_agents/interrupt_agent) are
 //             in the deny set -> one rejection, self-heal, then ARM.
 // Scenario 2: the global registry is only partially populated at agent creation
-//             -> whatever arms early must CONVERGE once the registry fills and
-//             tools/change fires (the real 07:44:40 -> 07:44:57 sequence).
+//             -> whatever arms early must CONVERGE once the registry fills.
+//             PR #1 converged on tools/change; PR #2 dropped that listener
+//             (it is the host-killing feedback loop), so convergence must now
+//             happen at the agent/pre-step boundary — and the event alone must
+//             NOT reconcile any more.
 // Scenario 4: every name on the surface is visible but not restrictable ->
 //             the reconciled deny is EMPTY, which must stay PENDING. Real DSH
 //             accepts restrict({deny:[]}) as a silent no-op, so an empty deny
@@ -90,7 +93,16 @@ function harness(readyRef) {
   // DEVICE SEMANTICS: restrict() fires tools/change synchronously.
   const emitChange = () => { for (const fn of (listeners.get("tools/change") ?? [])) fn({}); };
   const fire = (e, p) => { for (const f of (listeners.get(e) ?? [])) f(p ?? {}); };
-  return { ctx, agent, denied, fire, stats: () => ({ restrictCalls, rejects }) };
+  // PR #2: the router listens to agent/pre-step (a cordis waterfall taking a
+  // next() continuation), NOT tools/change. Drive that boundary exactly the way
+  // dsh-agent-loop does, so scenario 2 can assert the NEW contract.
+  const preStep = async (forAgent = agent) => {
+    const next = () => Promise.resolve({ kind: "enter", messages: [] });
+    for (const fn of (listeners.get("agent/pre-step") ?? [])) {
+      await fn({ agent: forAgent, messages: [], turn: 1, step: 1 }, next);
+    }
+  };
+  return { ctx, agent, denied, fire, preStep, stats: () => ({ restrictCalls, rejects }) };
 }
 
 const main = async () => {
@@ -123,7 +135,15 @@ const main = async () => {
     readyRef.list = GLOBAL.slice();
     h.fire("tools/change", {});
     await tick();
+    // PR #2: no tools/change listener exists any more, so the event alone must
+    // NOT reconcile anything — the mask is still the partial one (read_image).
+    ok(h.denied.size === 1, "tools/change alone no longer reconciles (denied=" + h.denied.size + ")");
+    // Convergence now happens at the STEP BOUNDARY the agent loop drives.
+    await h.preStep();
+    await tick();
     h.fire("tools/change", {});
+    await tick();
+    await h.preStep();
     await tick();
     const st = h.stats();
     console.log("after registry ready: restrictCalls=" + st.restrictCalls + " denied=" + h.denied.size);
