@@ -59,7 +59,8 @@ const FETCH_TIMEOUT_MS = 60000;
 const SELF = 'find_tool';
 
 /** Terse labels for Stage-1 criteria; schemas come from the live registry. */
-import { readFileSync } from 'node:fs';
+import { readFileSync, appendFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 let LABELS = {};
@@ -74,7 +75,22 @@ try {
   console.error('[dsh-tool-router] label registry unavailable:', e?.message ?? e);
 }
 
-const log = (...a) => console.error('[dsh-tool-router]', ...a);
+const log = (...a) => {
+  console.error('[dsh-tool-router]', ...a);
+  // The harness does not persist plugin stderr, so mask-arming diagnostics are
+  // invisible after the fact — which is how a host-killing loop stayed invisible
+  // for two days. Mirror every line to a file as well; never let logging break
+  // routing, and let deployments opt out with DSH_TOOL_ROUTER_LOG=0 (or point it
+  // somewhere else with a path).
+  const target = process.env.DSH_TOOL_ROUTER_LOG;
+  if (target === '0') return;
+  try {
+    appendFileSync(
+      target || `${homedir()}/.dsh/tool-router.log`,
+      `${new Date().toISOString()} ${a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')}\n`,
+    );
+  } catch { /* ignore */ }
+};
 
 const CANDIDATES = [...new Set([...Object.keys(LABELS), 'bash', 'present'])];
 
@@ -188,6 +204,23 @@ export function apply(ctx) {
    *     a macrotask (pendingFlush) instead of running nested;
    *   - an armed mask whose deny set did not change is left untouched, so
    *     deferred drains converge instead of re-restricting forever.
+   *
+   * 2026-10-28: the arm/disarm storm still killed the host twice (10-26 and
+   * 10-28, logs: ~136 and ~532 tools/change in a single second, then a host
+   * crash log). Forensics on the 10-28 log showed the storm firing while this
+   * plugin was INERT (0 re-arms: only "1 armed, 0 pending"), so the other party
+   * was the shipped `tool-subagent` standing-modelSelectionSettings path, which
+   * also reconciles on tools/change (04_工具/_试作/_asar_presets/tool-subagent.js
+   * line 611). Two plugins that both react to tools/change by changing the
+   * registry form a publication/withdrawal feedback loop — exactly the class
+   * dsh-ops' official hiding guards against with a before/after snapshot
+   * (dsh-ops/lib/official-tool-hiding.js lines 62-74).
+   *
+   * The structural fix: NEVER subscribe to tools/change. The synchronous
+   * recursion entry point is gone by construction. Late registrations are
+   * picked up at the next step boundary (`agent/pre-step`), where recompute()
+   * still dedups on the deny-set key and therefore makes no registry write
+   * when nothing changed.
    */
   let pendingFlush = false;
   let drainScheduled = false;
@@ -257,36 +290,34 @@ export function apply(ctx) {
     const wanted = all
       .filter((s) => s.name !== SELF && !rec.revealed.has(s.name))
       .map((s) => s.name);
-    if (wanted.length === 0) {
-      // NOTHING TO HIDE YET. At agent creation the preset's tool plugins have
-      // often not mounted. Returning success here would arm an empty mask and
-      // let every later-registered tool into prefill — signal pending instead.
-      log(`agent ${short(agent)}: 0 tools to hide yet (armed=false)`);
-      return false;
-    }
 
-    // `tools.restrict({ deny })` validates EVERY name against the GLOBAL registry
-    // and throws the whole call when a single name is unknown there. Agent-scoped
-    // tools — a team's send_message / list_agents / interrupt_agent — are registered
-    // per agent, not globally, so ONE of them poisons the entire deny set: the mask
-    // never arms, every schema stays in prefill, and the retry loop ends in
-    // "gave up arming mask". On device (27-name surface, 24 globally registered)
-    // that left toolsTokens at 5837 where ~1400 was reachable.
+    // LOCAL PATCH (2026-10-26): DSH's tools.restrict() validates EVERY name in
+    // the deny set against the GLOBAL tool registry and throws the whole call if
+    // any single name is unknown there. Agent-scoped tools (send_message,
+    // list_agents, interrupt_agent) are not globally registered, so one such name
+    // aborted arming entirely: 20 retries, "gave up arming mask", and every
+    // schema stayed in prefill (on device: toolsTokens = 5837).
     //
     // Reconcile against the admission list the rejection itself reports
     // ("known global tools: a, b, c"), and MEMOISE the result per exact surface.
-    // The memo is load-bearing, not an optimisation: restrict() fires tools/change
-    // synchronously, so every successful arm re-enters recompute(). Without the
-    // memo that re-entry started from the un-reconciled set again, threw, lifted
-    // the good mask and re-armed — a self-sustaining storm (measured on device:
-    // ~2800 arm cycles/s on one core, 8k log lines/s). Keying the memo on the
-    // surface also keeps this correct while tool plugins are still mounting: a
-    // smaller surface is a different key, so nothing learned there leaks onto the
-    // full surface later (which is what a name-based blacklist got wrong: it stuck
-    // at 14 of 24).
+    // The memo is load-bearing: restrict() fires tools/change synchronously, so
+    // every successful arm re-enters recompute(). Without the memo that re-entry
+    // started from the un-reconciled set again, threw, lifted the good mask and
+    // re-armed - a self-sustaining storm (measured on device: ~2800 arm cycles/s
+    // on one core, 8k log lines/s). Keying the memo on the surface keeps this
+    // correct while tool plugins are still mounting: a smaller surface is a
+    // different key, so nothing learned there leaks onto the full surface later.
     const wantedKey = wanted.slice().sort().join(',');
     const resolved = rec.resolved ?? (rec.resolved = new Map());
     let deny = (resolved.get(wantedKey) ?? wanted).slice();
+
+    if (deny.length === 0) {
+      // NOTHING TO HIDE YET. At agent creation the preset's tool plugins have
+      // often not mounted. Returning success here would arm an empty mask and
+      // let every later-registered tool into prefill - signal pending instead.
+      log(`agent ${short(agent)}: 0 tools to hide yet (armed=false)`);
+      return false;
+    }
 
     let armed = false;
     for (let attempt = 0; attempt < 3 && !armed; attempt += 1) {
@@ -305,19 +336,23 @@ export function apply(ctx) {
       } catch (e) {
         const msg = String(e?.message ?? e);
         const known = /known global tools:\s*(.*)$/im.exec(msg);
-        const admitted = known
-          ? new Set(known[1].split(',').map((n) => n.trim()).filter(Boolean))
-          : null;
-        const next = admitted ? deny.filter((n) => admitted.has(n)) : deny;
-        if (!admitted || next.length === deny.length) {
-          log('restrict failed:', msg);        // not a scope problem — real failure
+        if (!known) {
+          log('restrict failed (unparseable):', msg);
           return false;
         }
-        log(`restrict rejected ${deny.length - next.length} agent-scoped tool(s) `
-          + `(${deny.filter((n) => !admitted.has(n)).join(', ')}); `
-          + `denying ${next.length}`);
+        const admitted = new Set(
+          known[1].split(',').map((n) => n.trim()).filter(Boolean),
+        );
+        const next = deny.filter((n) => admitted.has(n));
+        if (next.length === deny.length) {
+          log('restrict failed: admission list did not narrow the deny set');
+          return false;
+        }
+        log(`restrict rejected ${deny.length - next.length} non-global name(s) `
+          + `(${deny.filter((n) => !admitted.has(n)).join(', ')}) `
+          + `- denying ${next.length} of ${wanted.length}`);
         deny = next;
-        resolved.set(wantedKey, next.slice());  // never pay this rejection twice
+        resolved.set(wantedKey, next.slice());   // never pay this rejection twice
         if (deny.length === 0) {
           log(`agent ${short(agent)}: no globally-registered tool to hide yet (pending)`);
           return false;
@@ -382,6 +417,35 @@ export function apply(ctx) {
     timers.add(t);
   };
 
+  /**
+   * Rebuild "what the model may already see" from the SESSION LOG.
+   *
+   * 2026-10-28 事故（session 35a5fef0 第 17 轮）：`revealed` 只活在插件内存里，
+   * 宿主重启/插件重挂后从空集开始，掩码把上一轮刚用过的 bash/read/edit 重新遮住。
+   * 模型的对话上下文不会跟着重置，于是它继续调用 -> `unknown tool` -> find_tool
+   * -> 揭示 -> 重试，每次重试重发整包上下文。实测：3 次循环烧掉 419,672 输入
+   * token，占该轮总量 98.9%。
+   *
+   * Harness 第一条设计原则就是 "The session log is the only source of truth...
+   * plugin memory is a derived cache"（dsh-ops skills/.../practices.md 第 1 条）。
+   * 所以按日志重建：本会话 `tool/call` 里出现过的工具，都算已揭示。
+   */
+  const seedRevealed = (agent) => {
+    const revealed = new Set();
+    try {
+      const sessions = typeof ctx.get === 'function' ? ctx.get('sessions') : undefined;
+      const session = sessions?.get?.(agent?.id) ?? agent?.session;
+      const events = session?.snapshotEvents?.() ?? session?.ownEvents?.() ?? [];
+      for (const ev of events) {
+        const name = ev?.type === 'tool/call' ? ev.data?.name : undefined;
+        if (name && name !== SELF) revealed.add(name);
+      }
+    } catch (e) {
+      log('seedRevealed failed (mask starts empty):', e?.message ?? e);
+    }
+    return revealed;
+  };
+
   const adopt = (agent) => {
     const ready = !!agent?.ctx?.tools;
     const already = byAgent.has(agent);
@@ -392,7 +456,13 @@ export function apply(ctx) {
     // never returned on device. Empty here is normal: preset tool plugins mount
     // asynchronously, so recompute() returns pending and we retry.
     const schemas = probe(agent);
-    byAgent.set(agent, { agent, schemas, revealed: new Set(), dispose: null });
+    // Seed from the log BEFORE the first arm, so a restart cannot re-hide a tool
+    // the conversation already used (see seedRevealed).
+    const revealed = seedRevealed(agent);
+    byAgent.set(agent, { agent, schemas, revealed, dispose: null });
+    if (revealed.size) {
+      log(`seeded ${revealed.size} already-used tool(s) from session log: ${[...revealed].join(', ')}`);
+    }
 
     let ok = false;
     try { ok = recompute(agent); } catch (e) {
@@ -486,20 +556,33 @@ export function apply(ctx) {
         // only have come from our own shortlist, so the choice is certain.
         const hit = byName.get(request) ?? byName.get(request.toLowerCase());
         if (hit && hit.name !== SELF) {
+          // Was this tool ALREADY handed to the model? If so, say so explicitly and
+          // skip the re-arm entirely. Measured 2026-10-29 02:37-02:41: six
+          // find_tool calls for read/edit that were already visible (seeded from
+          // the log), each costing a full-context round trip. `already_available`
+          // is the machine-readable stop signal for that loop.
+          let already = false;
           if (agent) {
             const r = byAgent.get(agent);
             if (r) {
+              already = r.revealed.has(hit.name);
               r.revealed.add(hit.name);
-              try { recompute(agent); } catch (e) { log('reveal failed:', e?.message ?? e); }
+              if (!already) {
+                try { recompute(agent); } catch (e) { log('reveal failed:', e?.message ?? e); }
+              }
             }
           }
-          log(`revealed "${hit.name}" via exact name match`);
+          log(already
+            ? `"${hit.name}" was already available via exact name match (no re-arm)`
+            : `revealed "${hit.name}" via exact name match`);
           return {
-            selected: hit.name, confidence: 1, pNone: 0,
+            selected: hit.name, confidence: 1, pNone: 0, already_available: already,
             tool: { name: hit.name, description: hit.description },
             schema: hit.parameters ?? null,
             candidates: [hit.name],
-            note: 'The selected tool is now available. Call it with the schema above.',
+            note: already
+              ? 'This tool was ALREADY available before this call. Call it directly with the schema above; do not call find_tool for it again.'
+              : 'The selected tool is now available. Call it with the schema above.',
           };
         }
 
@@ -570,22 +653,29 @@ export function apply(ctx) {
         }
 
         // Stage 2 — deliver the schema AND expose exactly that one tool.
+        let alreadyChosen = false;
         if (agent) {
           const r = byAgent.get(agent);
           if (r) {
+            alreadyChosen = r.revealed.has(chosen);
             r.revealed.add(chosen);
-            try { recompute(agent); } catch (e) { log('reveal failed:', e?.message ?? e); }
+            if (!alreadyChosen) {
+              try { recompute(agent); } catch (e) { log('reveal failed:', e?.message ?? e); }
+            }
           }
         }
-        log(`revealed "${chosen}" conf=${confidence.toFixed(3)} pNone=${pNone.toFixed(3)} `
+        log(`${alreadyChosen ? 'already available' : 'revealed'} "${chosen}" `
+          + `conf=${confidence.toFixed(3)} pNone=${pNone.toFixed(3)} `
           + `over ${candidates.length} candidates`);
 
         return {
-          selected: chosen, confidence, pNone, probabilities,
+          selected: chosen, confidence, pNone, probabilities, already_available: alreadyChosen,
           tool: { name: schema.name, description: schema.description },
           schema: schema.parameters ?? null,
           candidates: candidates.map((c) => c.name),
-          note: 'The selected tool is now available. Call it with the schema above.',
+          note: alreadyChosen
+            ? 'This tool was ALREADY available before this call. Call it directly with the schema above; do not call find_tool for it again.'
+            : 'The selected tool is now available. Call it with the schema above.',
         };
       },
     });
@@ -602,33 +692,43 @@ export function apply(ctx) {
     };
     ctx.on('agent/created', onCreated);
 
-    // --- surface changes ----------------------------------------------------
-    // Preset/host tools can register after we mount (and after an agent is
-    // created, as the boot log showed). A snapshot deny list would let them
-    // into prefill, so re-arm on every registry change.
-    const onChange = () => {
-      if (byAgent.size === 0) return;          // nothing to protect yet
-      for (const r of byAgent.values()) {
-        if (r.arming) { pendingFlush = true; return; } // defer to drain
-      }
-      let armed = 0;
-      let pending = 0;
-      for (const agent of byAgent.keys()) {
+    // --- surface changes: STEP BOUNDARY ONLY, never tools/change ------------
+    // 2026-10-28: this used to be `ctx.on('tools/change', onChange)`. That is
+    // the synchronous entry point of the feedback loop (see the comment on
+    // pendingFlush above): a registry write re-enters the handler inside
+    // restrict() itself, and the shipped tool-subagent does the same, so the
+    // two ping-pong until the host dies. Reconciling at agent/pre-step keeps
+    // the same guarantee (a late-registered tool is hidden before it can enter
+    // a model request) with no listener inside the registry's own event.
+    // Trade-off: a tool registered in the MIDDLE of a step stays visible until
+    // the next step boundary. That leak is bounded and cheap; the loop was not.
+    const onPreStep = (payload, next) => {
+      const agent = payload?.agent;
+      if (agent) {
+        // Self-heal: an Agent that existed BEFORE this plugin mounted (a live
+        // bundle enable, an HMR reload after an edit) never receives
+        // agent/created, so it would stay untracked and never get a mask —
+        // measured on 2026-10-28: plugin mounted at 19:36, no adopt line, no
+        // mask, every schema still in prefill. Adopt here instead.
+        if (!byAgent.has(agent)) {
+          try { adopt(agent); } catch (e) { log('pre-step adopt failed:', e?.message ?? e); }
+        }
         try {
-          if (recompute(agent)) armed++;
-          else { pending++; scheduleRetry(agent); }
-        } catch (e) { log('recompute failed:', e?.message ?? e); }
+          if (byAgent.has(agent) && !recompute(agent)) scheduleRetry(agent);
+        } catch (e) {
+          log('pre-step reconcile failed:', e?.message ?? e);
+        }
       }
-      log(`tools/change -> ${armed} armed, ${pending} pending`);
+      return next();
     };
-    ctx.on('tools/change', onChange);
-    onChangeRef = onChange;
+    ctx.on('agent/pre-step', onPreStep);
+    onChangeRef = null;   // no tools/change subscription exists any more
 
-    log('subscribed to agent/created + tools/change');
+    log('subscribed to agent/created + agent/pre-step (NOT tools/change)');
 
     return () => {
       try { ctx.off('agent/created', onCreated); } catch { /* disposed */ }
-      try { ctx.off('tools/change', onChange); } catch { /* disposed */ }
+      try { ctx.off('agent/pre-step', onPreStep); } catch { /* disposed */ }
       for (const t of timers) clearTimeout(t);
       timers.clear();
       for (const rec of byAgent.values()) {

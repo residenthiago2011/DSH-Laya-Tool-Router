@@ -124,6 +124,7 @@ node router-import-test.mjs   # module shape (no dependencies)
 node rank-sim.mjs             # Stage-0 ranking on sample queries (needs tool-registry.json)
 node router-e2e-test.mjs      # full flow: arm/deny-set/live reveal — requires the decision endpoint at 127.0.0.1:8081
 node restrict-scope-test.mjs   # deny-set vs the global registry (agent-scoped tools)
+node router-storm-test.mjs     # mask lifecycle without a decision endpoint; no tools/change listener
 ```
 
 `router-e2e-test.mjs` uses a stub DSH context that emits `tools/change`
@@ -131,6 +132,15 @@ synchronously (the worst case that once caused a ~970x feedback loop), then
 drives the real `find_tool` against a live decision endpoint: armed-once,
 deny-set dedup, late registration, reveal re-arm, empty-request catalog hint,
 and the exact-name fast path. `ALL_PASS` is expected.
+
+`router-storm-test.mjs` needs no endpoint. It pins the three properties that
+matter for survival: (1) no `tools/change` listener exists after mount, so a
+foreign event storm cannot re-enter the plugin — 200 injected events must
+produce 0 `restrict()` calls; (2) an agent that existed before the plugin
+mounted is adopted at its first step boundary; (3) a re-mount rebuilds
+`revealed` from the session log, so tools the conversation already used are not
+hidden again, and asking for one of them answers `already_available: true`
+without a registry write.
 
 ## Notes
 
@@ -140,3 +150,55 @@ and the exact-name fast path. `ALL_PASS` is expected.
   calls with `{}`. Always compile.
 - The empty-request catalog hint and the exact-name fast path exist for
   small models; see `execute()` in `index.js`.
+- Diagnostics go to stderr and are mirrored to `~/.dsh/tool-router.log`
+  (`DSH_TOOL_ROUTER_LOG` overrides the path, `DSH_TOOL_ROUTER_LOG=0` disables
+  the mirror). The harness does not keep plugin stderr, and the log is what made
+  the two host-killing incidents below diagnosable after the fact.
+
+## Reconcile at the agent step boundary, never inside `tools/change`
+
+This is the load-bearing design rule, learned from two hosts that died.
+
+`tools.restrict()` and `tools.register()` publish `tools/change` **synchronously**,
+so a listener that reacts to `tools/change` by changing the registry re-enters
+itself. Two such plugins form a publication/withdrawal feedback loop. Measured:
+532 events in two seconds, then 136 in one second, then `crash-*-host.log`
+(`~/.dsh/tool-router.log`, 2026-10-26 and 2026-10-28; the 10-26 storm grew the
+log to 130.5 MB). In the second incident the router was *inert* — every line was
+`1 armed, 0 pending`, zero re-arms — because the other half of the loop was a
+different plugin that also reconciles on `tools/change`.
+
+The fix is structural, not a guard: **the router subscribes to nothing in that
+event.** Late registrations are picked up at `agent/pre-step`, and `recompute()`
+still dedups on the deny-set key, so an unchanged surface performs no registry
+write at all. The trade-off is bounded and cheap: a tool registered in the
+middle of a step stays visible until the next step boundary.
+
+## Rebuild `revealed` from the session log, not from plugin memory
+
+`revealed` (the set of tools already handed to the model) is derived state. It
+must survive a host restart, because the *conversation* survives: the model keeps
+calling tools it used before the restart.
+
+Measured on 2026-10-28 (session `35a5fef0`, turn 17): the host restarted, the
+fresh plugin instance armed its mask with `revealed=0`, and `bash` / `read` /
+`edit` — used 19 / 5 / 9 times in the previous turn — became invisible. The model
+kept calling them, got `Error: unknown tool "bash"`, called `find_tool`, retried.
+Each retry resent the whole context: **419,672 input tokens, 98.9% of that
+turn**, for three tool calls that the model already knew how to make.
+
+`adopt()` therefore seeds the set from `ctx.get('sessions').get(agent.id).snapshotEvents()`,
+adding every `tool/call` name. Re-mounting after this change restores 8 tools on
+that same session and produces zero `unknown tool` errors.
+
+`find_tool` answers `already_available: true` when the requested tool was already
+visible, and a seeded tool asked for again makes **no** registry write — measured
+`restrict()` call count unchanged, and the log line reads
+`"bash" was already available via exact name match (no re-arm)`.
+
+## An agent that predates the plugin
+
+`agent/created` does not fire for an agent that already exists when the plugin
+mounts (a live bundle enable, an HMR reload, a resumed session). `agent/pre-step`
+adopts such an agent on its first step; without that it stays untracked and never
+gets a mask — every schema stays in prefill, silently.
