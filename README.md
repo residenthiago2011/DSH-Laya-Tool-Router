@@ -63,6 +63,10 @@ half of the shelf is exactly what a default profile charges for from word one.
    `persona` + `dsh-tool-router`. The persona tells the model: no tools are
    declared; call `find_tool` first — and if a result carries no schema,
    retry with an exact tool name or an empty request instead of giving up.
+   It also states the reveal rule from PR #2: every tool already used in the
+   session stays available for the rest of it (including after a host
+   restart), so an answer carrying `"already_available": true` means *call it
+   directly, do not ask again*.
 2. **Host tool rows enabled** — `tool-bash`, `tool-fs`, `tool-fs-search`,
    `tool-todo`, `tool-web` flipped to `disabled: false`, plus a `present`
    row inserted. Discovery needs the tools to exist somewhere; preset-scoped
@@ -71,7 +75,8 @@ half of the shelf is exactly what a default profile charges for from word one.
 
 ## Prerequisites
 
-- DSH 0.2.0-rc.2 (bundles mechanism with `dsh.bundle.patch`).
+- DSH with the bundle mechanism (`dsh.bundle.patch`) — available since
+  `0.1.1-rc.2`; verified against `0.2.1-rc.3`.
 - A running **decision model API** that speaks `POST /v1/systemone`
   (the router defaults to `http://127.0.0.1:8081/v1/systemone`; edit
   `ROUTER_BASE` in `index.js` to point at another host or port).
@@ -116,22 +121,33 @@ tool flips vanish with the bundle patch; other presets are untouched.
 | `index.js` | The router plugin: registers `find_tool`, masks every other tool per agent, runs the 3-stage decision. |
 | `cordis.patch.yml` | The bundle patch: preset declaration + host tool enablement. |
 | `tool-registry.json` | Stage-0 labels and Stage-1 criteria (25 tools, both shells incl. `bash`). |
+| `router-import-test.mjs`, `rank-sim.mjs`, `router-e2e-test.mjs`, `restrict-scope-test.mjs`, `router-storm-test.mjs` | The five test suites (see [Tests](#tests)). |
 
 ## Tests
 
 ```sh
-node router-import-test.mjs   # module shape (no dependencies)
-node rank-sim.mjs             # Stage-0 ranking on sample queries (needs tool-registry.json)
-node router-e2e-test.mjs      # full flow: arm/deny-set/live reveal — requires the decision endpoint at 127.0.0.1:8081
-node restrict-scope-test.mjs   # deny-set vs the global registry (agent-scoped tools)
-node router-storm-test.mjs     # mask lifecycle without a decision endpoint; no tools/change listener
+node router-import-test.mjs    # module shape (no dependencies)
+node rank-sim.mjs              # Stage-0 ranking on sample queries (needs tool-registry.json)
+node router-e2e-test.mjs       # full flow: arm/deny-set/live reveal — needs the decision endpoint at 127.0.0.1:8081
+node restrict-scope-test.mjs   # deny-set vs the global registry (agent-scoped + empty-deny cases)
+node router-storm-test.mjs     # mask lifecycle, no endpoint: no tools/change listener, step-boundary reconcile
 ```
 
 `router-e2e-test.mjs` uses a stub DSH context that emits `tools/change`
 synchronously (the worst case that once caused a ~970x feedback loop), then
 drives the real `find_tool` against a live decision endpoint: armed-once,
-deny-set dedup, late registration, reveal re-arm, empty-request catalog hint,
-and the exact-name fast path. `ALL_PASS` is expected.
+deny-set dedup, late registration **at the step boundary** (the `tools/change`
+event itself must no longer write to the registry), reveal re-arm,
+empty-request catalog hint, and the exact-name fast path. `ALL_PASS` is
+expected.
+
+`restrict-scope-test.mjs` runs without an endpoint and pins the deny-set
+reconciliation: one rejection self-heals against the admission list the error
+reports, convergence happens through `agent/pre-step` (firing `tools/change`
+alone must NOT reconcile any more), and a surface where every visible name is
+agent-scoped stays **pending** instead of calling `restrict({ deny: [] })` —
+real DSH accepts an empty deny as a silent no-op, which would report
+`armed mask hiding 0 tool(s)` and stop the retry loop with nothing masked.
 
 `router-storm-test.mjs` needs no endpoint. It pins the three properties that
 matter for survival: (1) no `tools/change` listener exists after mount, so a
@@ -152,7 +168,9 @@ without a registry write.
   small models; see `execute()` in `index.js`.
 - Diagnostics go to stderr and are mirrored to `~/.dsh/tool-router.log`
   (`DSH_TOOL_ROUTER_LOG` overrides the path, `DSH_TOOL_ROUTER_LOG=0` disables
-  the mirror). The harness does not keep plugin stderr, and the log is what made
+  the mirror). The mirror needs `~/.dsh` to exist — where it does not, the same
+  lines still reach stderr, which a host may capture (some service managers
+  redirect it into a file such as `service_direct.log`). The log is what made
   the two host-killing incidents below diagnosable after the fact.
 
 ## Reconcile at the agent step boundary, never inside `tools/change`
@@ -187,9 +205,19 @@ kept calling them, got `Error: unknown tool "bash"`, called `find_tool`, retried
 Each retry resent the whole context: **419,672 input tokens, 98.9% of that
 turn**, for three tool calls that the model already knew how to make.
 
-`adopt()` therefore seeds the set from `ctx.get('sessions').get(agent.id).snapshotEvents()`,
-adding every `tool/call` name. Re-mounting after this change restores 8 tools on
-that same session and produces zero `unknown tool` errors.
+`adopt()` therefore seeds the set from the session log itself:
+`ctx.get('sessions').get(agent.id)` resolves the `Session`, and the events are
+read from **`session.events`** — the array `@deepseek-ai/dsh-session` exposes
+(it is the same property the store's own `_forkSeed()` reads). Every
+`tool/call` name found there joins `revealed`. Re-mounting after this change
+restores 8 tools on that same session and produces zero `unknown tool` errors.
+
+> Historical note: PR #2 called `snapshotEvents()` / `ownEvents()` — methods
+> that exist in **no** installed DSH build, so on a real host the seed silently
+> returned `[]` while the stub-invented API passed its test. The method-shaped
+> forms are still tried first as forward-compatible fallbacks; the property is
+> what actually works today — a live run logs `seeded N already-used tool(s)
+> from session log: ...`.
 
 `find_tool` answers `already_available: true` when the requested tool was already
 visible, and a seeded tool asked for again makes **no** registry write — measured

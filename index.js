@@ -24,14 +24,17 @@
  * temperature_by_options["choice:11+"] = 0.1006 (logits x10), so that option
  * wins almost always — measured 0/8 correct with it present vs 7/8 without.
  *
- * Restriction lifecycle (why `tools/change` matters): `restrict({deny})` snapshots
- * a name list. Host tool plugins can register AFTER this one mounts, and a
- * snapshot would let them into prefill unnoticed. `tools/change` fires on every
- * registration/unregistration and on restriction changes, so the deny list is
- * recomputed whenever the surface moves. Tools already revealed are re-armed as
+ * Restriction lifecycle (why `agent/pre-step` matters): `tools.restrict({deny})`
+ * snapshots a name list. Host tool plugins can register AFTER this one mounts,
+ * and a snapshot would let them into prefill unnoticed - so the deny list is
+ * recomputed at every step boundary (plus the bounded arm retry), never inside
+ * `tools/change`, whose synchronous publication is the feedback loop that killed
+ * hosts twice (incident note in apply()). Tools already revealed are re-armed as
  * visible, never re-hidden.
  *
- * Diagnostics go to stderr, which DSH captures in service_direct.log.
+ * Diagnostics go to stderr (a host may capture it in a file such as
+ * `service_direct.log`) and mirror to `~/.dsh/tool-router.log` unless
+ * `DSH_TOOL_ROUTER_LOG=0`.
  */
 
 export const inject = ['tools'];
@@ -77,11 +80,11 @@ try {
 
 const log = (...a) => {
   console.error('[dsh-tool-router]', ...a);
-  // The harness does not persist plugin stderr, so mask-arming diagnostics are
-  // invisible after the fact — which is how a host-killing loop stayed invisible
-  // for two days. Mirror every line to a file as well; never let logging break
-  // routing, and let deployments opt out with DSH_TOOL_ROUTER_LOG=0 (or point it
-  // somewhere else with a path).
+  // The harness often does not persist plugin stderr, so mask-arming diagnostics
+  // can be invisible after the fact — which is how a host-killing loop stayed
+  // invisible for two days. Mirror every line to a file as well; never let
+  // logging break routing, and let deployments opt out with
+  // DSH_TOOL_ROUTER_LOG=0 (or point it somewhere else with a path).
   const target = process.env.DSH_TOOL_ROUTER_LOG;
   if (target === '0') return;
   try {
