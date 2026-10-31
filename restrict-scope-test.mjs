@@ -7,6 +7,11 @@
 // Scenario 2: the global registry is only partially populated at agent creation
 //             -> whatever arms early must CONVERGE once the registry fills and
 //             tools/change fires (the real 07:44:40 -> 07:44:57 sequence).
+// Scenario 4: every name on the surface is visible but not restrictable ->
+//             the reconciled deny is EMPTY, which must stay PENDING. Real DSH
+//             accepts restrict({deny:[]}) as a silent no-op, so an empty deny
+//             reaching restrict() would report "armed mask hiding 0 tool(s)"
+//             and stop the retry loop with nothing masked.
 import { apply } from "./index.js";
 
 const params = { type: "object", properties: { request: { type: "string" } }, required: ["request"] };
@@ -30,7 +35,12 @@ function harness(readyRef) {
   const listeners = new Map();
   let restrictCalls = 0;
   let rejects = 0;
-  const known = (n) => readyRef.list.includes(n);
+  // ADMISSION vs VISIBILITY are different sets on device: `visible` is what the
+  // agent can see (incl. its own layer), `restrictableNames` (the rejection's
+  // "known global tools") is only what DSH accepts in a deny list. Scenario 4
+  // overrides `global` to model names that are visible but never restrictable.
+  const admitted = () => (readyRef.global ?? readyRef.list);
+  const known = (n) => admitted().includes(n);
   const defOf = (n) => {
     if (registry.has(n)) return registry.get(n);
     if (known(n) || GLOBAL.includes(n) || AGENT_SCOPED.includes(n)) {
@@ -43,13 +53,23 @@ function harness(readyRef) {
     schemas() { return readyRef.list.map((n) => defOf(n)).filter(Boolean); },
     get(n) { return denied.has(n) ? undefined : defOf(n); },
     restrict({ deny }) {
-      if (!Array.isArray(deny) || deny.length === 0) throw new Error("restrict called with bad deny");
+      if (!Array.isArray(deny)) throw new Error("restrict called with a non-array filter");
+      // REAL DSH SEMANTICS (verified against dsh-tools/lib/index.js): only
+      // `restrict({})` — both filters undefined — throws. `restrict({ deny: [] })`
+      // is a legal silent no-op that SUCCEEDS and returns a disposer, so this
+      // stub cannot paper over an empty deny with a throw. Scenario 4 depends
+      // exactly on that difference.
+      if (deny.length === 0) {
+        restrictCalls += 1;
+        emitChange();
+        return () => {};
+      }
       const unknown = deny.filter((n) => !known(n));
       if (unknown.length > 0) {
         rejects += 1;
         throw new Error('tools.restrict() names unknown global tools '
           + unknown.map((n) => '"' + n + '"').join(", ")
-          + "; known global tools: " + readyRef.list.join(", "));
+          + "; known global tools: " + admitted().join(", "));
       }
       restrictCalls += 1;
       for (const n of deny) denied.add(n);
@@ -125,6 +145,25 @@ const main = async () => {
     ok(st.restrictCalls <= 4, "no arm/disarm storm from synchronous tools/change (restrictCalls=" + st.restrictCalls + ")");
     ok(st.rejects <= 2, "rejection not paid repeatedly (rejects=" + st.rejects + ")");
     ok(h.denied.size >= 20, "mask actually armed after re-entry (denied=" + h.denied.size + ")");
+  }
+
+  console.log("--- scenario 4: whole surface agent-scoped -> reconciled deny is empty ---");
+  {
+    // Visible but never restrictable: the admission list knows only find_tool
+    // (agent-scoped names resolve through their own layer, like on device).
+    const readyRef = { list: ["find_tool", ...AGENT_SCOPED], global: ["find_tool"] };
+    const h = harness(readyRef);
+    apply(h.ctx);
+    h.fire("agent/created", { agent: h.agent });
+    // Long enough for the 500 ms arm retry — that retry is where a memoised
+    // empty deny used to slip past the catch-only guard and call restrict([]).
+    await new Promise((r) => setTimeout(r, 800));
+    const st = h.stats();
+    console.log("restrictCalls=" + st.restrictCalls + " rejects=" + st.rejects + " denied=" + h.denied.size);
+    ok(st.restrictCalls === 0,
+      "empty reconciled deny never reaches restrict() (restrictCalls=" + st.restrictCalls + ")");
+    ok(h.denied.size === 0, "nothing hidden while nothing is restrictable (denied=" + h.denied.size + ")");
+    ok(st.rejects === 1, "scope rejection reported once (rejects=" + st.rejects + ")");
   }
 
   console.log(failures.length === 0 ? "ALL_PASS" : "HAS_FAILURES: " + failures.join(" | "));
